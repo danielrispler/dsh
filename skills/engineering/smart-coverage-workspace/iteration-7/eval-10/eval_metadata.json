@@ -1,0 +1,1 @@
+{"eval_id":10,"eval_name":"ts-blind-spots","prompt":"I added src/discount.ts with applyDiscount(price, percent). There is one existing test (percent=50, price=100). Use smart-coverage to find missing coverage."}

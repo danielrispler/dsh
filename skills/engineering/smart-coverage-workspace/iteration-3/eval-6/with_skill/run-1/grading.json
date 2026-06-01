@@ -1,0 +1,20 @@
+{
+  "expectations": [
+    {
+      "text": "No TypeScript describe( syntax",
+      "passed": true,
+      "evidence": "0 matches for describe(. bats-core @test syntax throughout."
+    },
+    {
+      "text": "No Go func Test syntax",
+      "passed": true,
+      "evidence": "0 matches for func Test."
+    },
+    {
+      "text": "Generic AAA or fallback handling present",
+      "passed": true,
+      "evidence": "lang=bash detected via .sh extension. bash.md loaded. @test with setup()/teardown() PATH-stub injection. No JS pseudo-code."
+    }
+  ],
+  "summary": {"pass_rate": 1.0, "passed": 3, "failed": 0, "total": 3}
+}

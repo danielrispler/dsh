@@ -1,0 +1,40 @@
+{
+  "expectations": [
+    {
+      "text": "Separate TypeScript and Go sections",
+      "passed": true,
+      "evidence": "Report has distinct ## TypeScript and ## Go top-level sections, each with their own Phase 2/3 classification and gap lists"
+    },
+    {
+      "text": "TypeScript section uses describe/it",
+      "passed": true,
+      "evidence": "TypeScript Critical gap snippet uses describe('uploadFile', () => { it('When no file...') }) with Vitest imports"
+    },
+    {
+      "text": "Go section uses func Test*",
+      "passed": true,
+      "evidence": "Go Critical gap uses func TestResize_WhenValidInputAndDimensions_ThenReturnsNonEmptyBytes(t *testing.T) and High gap uses func TestResize_WhenValidInput_ThenOutputIsNonNil"
+    },
+    {
+      "text": "No syntax bleed between sections",
+      "passed": true,
+      "evidence": "TypeScript section contains no Go syntax; Go section contains no TypeScript describe/it/expect constructs; each section uses its language idioms exclusively"
+    },
+    {
+      "text": "TypeScript section uses app.inject()",
+      "passed": true,
+      "evidence": "TypeScript Critical snippet calls app.inject({ method: 'POST', url: '/upload' }) on a Fastify instance"
+    },
+    {
+      "text": "Go stub correctly tagged [TDD]",
+      "passed": true,
+      "evidence": "Go Critical gap heading, High gap heading, and Low gap heading all include [TDD] tag; stub note explains tests should be written red-first"
+    }
+  ],
+  "summary": {
+    "pass_rate": 1.0,
+    "passed": 6,
+    "failed": 0,
+    "total": 6
+  }
+}

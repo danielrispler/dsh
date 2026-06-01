@@ -1,0 +1,290 @@
+{
+  "skill_name": "smart-coverage",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I just added a new HTTP controller at apps/server/payment.controller.ts that handles POST /payments. It calls a use-case and writes to a database. I also touched apps/server/payment.controller.test.ts (I only added a placeholder describe block, no actual tests). What tests should I write? Use the smart-coverage skill to analyze the gaps.",
+      "expected_output": "Uses describe/it TypeScript syntax. Identifies critical or high gaps for the controller. Suggests tests using When/Then naming. Does NOT use TestBed, func Test*, testWidgets, or any non-TypeScript syntax.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output contains TypeScript test syntax (describe or it('When",
+          "type": "contains_any",
+          "values": ["describe(", "it('When", "it(\"When"]
+        },
+        {
+          "text": "Output does NOT contain Go test syntax (func Test)",
+          "type": "not_contains",
+          "value": "func Test"
+        },
+        {
+          "text": "Output does NOT contain TestBed (Angular syntax leak)",
+          "type": "not_contains",
+          "value": "TestBed"
+        },
+        {
+          "text": "Output does NOT contain testWidgets (Flutter syntax leak)",
+          "type": "not_contains",
+          "value": "testWidgets"
+        },
+        {
+          "text": "Output identifies a gap (Critical or High) for the controller",
+          "type": "contains_any",
+          "values": ["Critical", "High", "🔴", "🟠"]
+        },
+        {
+          "text": "Test names use When/Then format",
+          "type": "contains_any",
+          "values": ["When", "Then"]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I modified two files: apps/server/user.controller.ts (an HTTP route handler) and apps/frontend/user.component.ts (an Angular component). What tests do I need? Use smart-coverage.",
+      "expected_output": "Angular component test uses TestBed pattern. HTTP controller test uses standard TypeScript describe/it. Separate guidance for each file type. No syntax mixing.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output mentions TestBed for the Angular component",
+          "type": "contains",
+          "value": "TestBed"
+        },
+        {
+          "text": "Output contains standard TypeScript test syntax for the controller",
+          "type": "contains_any",
+          "values": ["describe(", "it('When", "it(\"When"]
+        },
+        {
+          "text": "Output does NOT contain testWidgets (Flutter syntax leak)",
+          "type": "not_contains",
+          "value": "testWidgets"
+        },
+        {
+          "text": "Output does NOT contain func Test (Go syntax leak)",
+          "type": "not_contains",
+          "value": "func Test"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I added a new Go HTTP handler at api/payments/handler.go. It processes payment requests and calls an external payment gateway. Also changed go.sum. What tests should I write? Use smart-coverage.",
+      "expected_output": "Uses Go test syntax (func TestWhen*). go.sum is filtered/skipped. Suggests table-driven tests where appropriate. No TypeScript syntax.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output contains Go test function syntax",
+          "type": "contains_any",
+          "values": ["func Test", "t *testing.T", "*testing.T"]
+        },
+        {
+          "text": "go.sum is listed as skipped or not analyzed",
+          "type": "contains_any",
+          "values": ["go.sum", "Skipped", "⏭️"]
+        },
+        {
+          "text": "Output does NOT contain describe( (TypeScript syntax leak)",
+          "type": "not_contains",
+          "value": "describe("
+        },
+        {
+          "text": "Output does NOT contain TestBed (Angular syntax leak)",
+          "type": "not_contains",
+          "value": "TestBed"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "I have changes across two apps: apps/server/upload.controller.ts (TypeScript HTTP handler) and services/resizer/resize.go (Go image resizer). What tests do I need? Use smart-coverage.",
+      "expected_output": "Separate ## TypeScript and ## Go report sections. No syntax bleeding between sections. TypeScript section uses describe/it, Go section uses func Test*.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output has separate language sections",
+          "type": "contains_any",
+          "values": ["## TypeScript", "## Go", "TypeScript", "Go"]
+        },
+        {
+          "text": "Output contains TypeScript test syntax",
+          "type": "contains_any",
+          "values": ["describe(", "it('When", "it(\"When"]
+        },
+        {
+          "text": "Output contains Go test syntax",
+          "type": "contains_any",
+          "values": ["func Test", "t *testing.T"]
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "I added a new use-case at apps/server/checkout/checkout.use-case.ts. There's also a playwright.config.ts in the project. What tests should I write? Use smart-coverage.",
+      "expected_output": "Main report covers the TypeScript use-case. A separate ### E2E Gaps section is appended because playwright is detected. E2E section uses Playwright test() syntax.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output contains E2E Gaps section",
+          "type": "contains_any",
+          "values": ["E2E Gaps", "E2E Gap", "Playwright", "playwright"]
+        },
+        {
+          "text": "Output contains TypeScript use-case test suggestions",
+          "type": "contains_any",
+          "values": ["describe(", "it('When", "it(\"When", "When", "Then"]
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "I changed scripts/deploy.sh (a bash deployment script with no package.json or go.mod nearby). What tests should I write? Use smart-coverage.",
+      "expected_output": "Uses generic AAA pseudo-code because language is unknown/fallback. No language-specific syntax (no describe, func Test, testWidgets, etc.).",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output does NOT contain describe( (TypeScript leak)",
+          "type": "not_contains",
+          "value": "describe("
+        },
+        {
+          "text": "Output does NOT contain func Test (Go leak)",
+          "type": "not_contains",
+          "value": "func Test"
+        },
+        {
+          "text": "Output contains generic AAA or fallback handling",
+          "type": "contains_any",
+          "values": ["Arrange", "Act", "Assert", "AAA", "generic", "fallback", "pseudo"]
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "I added apps/server/order.controller.ts and apps/server/order.controller.test.ts (4 tests). Use smart-coverage to check coverage gaps AND flag any redundant tests.",
+      "expected_output": "Detects redundant tests in the test file: at least one DUPLICATE/SUBSET tag and one LOW SIGNAL tag. Recommends human review rather than auto-deletion. No invented APIs.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output has a Redundant Tests section",
+          "type": "contains_any",
+          "values": ["Redundant Tests", "🔁", "Redundant"]
+        },
+        {
+          "text": "Output tags at least one duplicate or subset test",
+          "type": "contains_any",
+          "values": ["DUPLICATE", "SUBSET", "Duplicate", "Subset", "subsumed", "subset"]
+        },
+        {
+          "text": "Output flags low-signal test",
+          "type": "contains_any",
+          "values": ["LOW SIGNAL", "Low signal", "framework invariant", "low-signal"]
+        },
+        {
+          "text": "Output does NOT recommend automatic deletion of tests",
+          "type": "not_contains",
+          "value": "rm "
+        },
+        {
+          "text": "Output uses TypeScript test syntax",
+          "type": "contains_any",
+          "values": ["describe(", "it('When", "it(\"When", "expect("]
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "I modified billing/billing.go — I deleted ProcessRefund and renamed CalculateTax to ComputeTax. The existing billing/billing_test.go still references the old names. Use smart-coverage.",
+      "expected_output": "Flags both ProcessRefund tests as DEAD (removed) and CalculateTax tests as DEAD (renamed). Recommends delete and rename respectively. Uses Go test syntax for any new gap sketches.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output identifies dead tests",
+          "type": "contains_any",
+          "values": ["DEAD", "Dead", "dead test", "removed", "renamed"]
+        },
+        {
+          "text": "Output mentions ProcessRefund as removed/dead",
+          "type": "contains",
+          "value": "ProcessRefund"
+        },
+        {
+          "text": "Output mentions CalculateTax or ComputeTax as renamed",
+          "type": "contains_any",
+          "values": ["CalculateTax", "ComputeTax", "renamed"]
+        },
+        {
+          "text": "Output does NOT contain TypeScript syntax",
+          "type": "not_contains",
+          "value": "describe("
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "I added api/orders/handler.go with HandleOrder that calls a package-level chargeCard function (no interface, no DI, hardcoded HTTPS endpoint). What tests should I write? Use smart-coverage.",
+      "expected_output": "Does NOT invent stubChargeCard / mockGateway / paymentRepository or similar. Either skips Exit Door 3 with reason 'no injectable seam' OR tags [REQUIRES REFACTOR] with a // fictitious comment on the invented identifier. Still suggests Exit Door 1 (response) and Exit Door 5 (error) tests using real httptest.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output does NOT invent stubChargeCard identifier",
+          "type": "not_contains",
+          "value": "stubChargeCard"
+        },
+        {
+          "text": "Output does NOT invent mockGateway identifier",
+          "type": "not_contains",
+          "value": "mockGateway"
+        },
+        {
+          "text": "Output does NOT invent HandleOrderWithGateway identifier",
+          "type": "not_contains",
+          "value": "HandleOrderWithGateway"
+        },
+        {
+          "text": "Output acknowledges no injectable seam OR tags REQUIRES REFACTOR",
+          "type": "contains_any",
+          "values": ["REQUIRES REFACTOR", "no injectable seam", "injectable", "refactor", "fictitious"]
+        },
+        {
+          "text": "Output still suggests real httptest-based tests for HandleOrder",
+          "type": "contains_any",
+          "values": ["httptest.NewRecorder", "httptest.NewRequest"]
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "I added src/discount.ts with applyDiscount(price, percent). There is one existing test (percent=50, price=100). Use smart-coverage to find missing coverage.",
+      "expected_output": "Flags missing tests for: falsy price (0/undefined), percent below 0 (throws), percent above 100 (throws), percent === 0 early return, and possibly boundary percent=100. Sketches use the real applyDiscount identifier — no invented APIs.",
+      "files": [],
+      "assertions": [
+        {
+          "text": "Output flags falsy price blind spot",
+          "type": "contains_any",
+          "values": ["price = 0", "price: 0", "falsy price", "!price", "price=0", "price is 0", "zero price"]
+        },
+        {
+          "text": "Output flags percent out-of-range / throw path",
+          "type": "contains_any",
+          "values": ["throw", "throws", "Error", "out of range", "percent < 0", "percent > 100", "-1", "101"]
+        },
+        {
+          "text": "Output flags percent === 0 boundary",
+          "type": "contains_any",
+          "values": ["percent === 0", "percent=0", "percent is 0", "percent: 0", "zero percent", "percent = 0"]
+        },
+        {
+          "text": "Sketch uses the real applyDiscount function",
+          "type": "contains",
+          "value": "applyDiscount"
+        },
+        {
+          "text": "Output uses TypeScript test syntax",
+          "type": "contains_any",
+          "values": ["describe(", "it('When", "it(\"When", "expect("]
+        }
+      ]
+    }
+  ]
+}

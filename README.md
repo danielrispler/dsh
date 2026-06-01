@@ -26,13 +26,6 @@ _Skills for daily non-code workflow tools._
 | Skill | Description |
 |-------|-------------|
 
-### Misc
-
-_Skills kept around but rarely used._
-
-| Skill | Description |
-|-------|-------------|
-
 ## Local Setup
 
 Link skills directly to `~/.claude/skills`:

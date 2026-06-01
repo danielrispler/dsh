@@ -1,0 +1,25 @@
+{
+  "expectations": [
+    {
+      "text": "func Test* syntax in output",
+      "passed": true,
+      "evidence": "4 matches for func Test in report"
+    },
+    {
+      "text": "go.sum listed as skipped",
+      "passed": true,
+      "evidence": "2 matches for go.sum/Skipped/\u23ed\ufe0f"
+    },
+    {
+      "text": "No TypeScript syntax leak (describe()",
+      "passed": true,
+      "evidence": "0 matches for describe("
+    }
+  ],
+  "summary": {
+    "pass_rate": 1.0,
+    "passed": 3,
+    "failed": 0,
+    "total": 3
+  }
+}

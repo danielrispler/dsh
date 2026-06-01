@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "func Test* syntax in output", "passed": true, "evidence": "func TestHandlePayment_WhenValidRequest_ThenReturns200(t *testing.T) with full httptest.NewRecorder() + httptest.NewRequest() bodies"},
+    {"text": "go.sum listed as skipped", "passed": true, "evidence": "Skipped section: go.sum — lock file; matches go.sum in Go reference SKIP_PATTERNS"},
+    {"text": "No TypeScript syntax leak", "passed": true, "evidence": "0 matches for describe(, it(, vi.fn"}
+  ],
+  "summary": {"pass_rate": 1.0, "passed": 3, "failed": 0, "total": 3}
+}

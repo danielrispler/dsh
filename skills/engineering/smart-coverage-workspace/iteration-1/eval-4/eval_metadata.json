@@ -1,0 +1,1 @@
+{"eval_id":4,"eval_name":"polyglot-ts-plus-go","prompt":"TS controller + Go resizer. Verify separate language sections, no syntax bleeding.","assertions":[{"text":"Separate TypeScript and Go sections","passed":null,"evidence":""},{"text":"TypeScript section uses describe/it","passed":null,"evidence":""},{"text":"Go section uses func Test*","passed":null,"evidence":""}]}

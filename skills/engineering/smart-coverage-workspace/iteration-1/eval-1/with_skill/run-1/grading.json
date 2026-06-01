@@ -1,0 +1,25 @@
+{
+  "expectations": [
+    {
+      "text": "Output contains TypeScript test syntax",
+      "passed": true,
+      "evidence": "Report contains 'describe', 'it', 'When' patterns"
+    },
+    {
+      "text": "Output does NOT contain Go/Angular/Flutter syntax",
+      "passed": true,
+      "evidence": "0 matches for func Test, TestBed, testWidgets"
+    },
+    {
+      "text": "Identifies Critical or High gap for controller",
+      "passed": true,
+      "evidence": "3 matches for Critical/High/\ud83d\udd34/\ud83d\udfe0"
+    }
+  ],
+  "summary": {
+    "pass_rate": 1.0,
+    "passed": 3,
+    "failed": 0,
+    "total": 3
+  }
+}

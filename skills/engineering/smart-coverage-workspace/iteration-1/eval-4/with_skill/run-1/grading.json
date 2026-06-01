@@ -1,0 +1,25 @@
+{
+  "expectations": [
+    {
+      "text": "Separate TypeScript and Go sections",
+      "passed": true,
+      "evidence": "1 match each for ## TypeScript and ## Go"
+    },
+    {
+      "text": "TypeScript section uses When/Then naming",
+      "passed": true,
+      "evidence": "Suggestions use When...Then format in TS section"
+    },
+    {
+      "text": "Go section uses func Test*",
+      "passed": true,
+      "evidence": "5 matches for func Test in Go section"
+    }
+  ],
+  "summary": {
+    "pass_rate": 1.0,
+    "passed": 3,
+    "failed": 0,
+    "total": 3
+  }
+}

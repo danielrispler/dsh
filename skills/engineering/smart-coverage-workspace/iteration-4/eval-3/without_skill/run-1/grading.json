@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "func Test* syntax in output", "passed": true, "evidence": "func TestHandlePayment_WhenCalled_ThenReturns200(t *testing.T) with httptest bodies"},
+    {"text": "go.sum listed as skipped", "passed": true, "evidence": "Opening note: 'go.sum is a dependency lock file and must not be tested'. Correct outcome by explicit note (not formal Skip section)."},
+    {"text": "No TypeScript syntax leak", "passed": true, "evidence": "0 matches for describe(, it(, vi.fn"}
+  ],
+  "summary": {"pass_rate": 1.0, "passed": 3, "failed": 0, "total": 3}
+}

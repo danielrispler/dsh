@@ -1,0 +1,20 @@
+{
+  "expectations": [
+    {
+      "text": "Separate TypeScript and Go sections",
+      "passed": true,
+      "evidence": "## TypeScript and ## Go sections with polyglot isolation. Remediation plan grouped by language (TS 1-3, Go 1-3)."
+    },
+    {
+      "text": "TypeScript section uses describe/it",
+      "passed": true,
+      "evidence": "describe/it with When/Then. Both stubs tagged [TDD]. Exit Door 2/3/4 dropped."
+    },
+    {
+      "text": "Go section uses func Test*",
+      "passed": true,
+      "evidence": "func Test* naming. Pure utility: no Critical (correct). Exit Door 2/3/4 dropped for stubs."
+    }
+  ],
+  "summary": {"pass_rate": 1.0, "passed": 3, "failed": 0, "total": 3}
+}

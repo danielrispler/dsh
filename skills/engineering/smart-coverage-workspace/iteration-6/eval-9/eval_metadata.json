@@ -1,0 +1,1 @@
+{"eval_id":9,"eval_name":"go-speculative-api","prompt":"I added api/orders/handler.go with HandleOrder that calls a package-level chargeCard function (no interface, no DI, hardcoded HTTPS endpoint). What tests should I write? Use smart-coverage."}

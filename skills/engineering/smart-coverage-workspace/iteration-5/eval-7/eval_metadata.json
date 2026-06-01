@@ -1,0 +1,1 @@
+{"eval_id":7,"eval_name":"ts-redundant-tests","prompt":"I added apps/server/order.controller.ts and apps/server/order.controller.test.ts (4 tests). Use smart-coverage to check coverage gaps AND flag any redundant tests."}

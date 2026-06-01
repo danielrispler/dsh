@@ -1,0 +1,20 @@
+{
+  "expectations": [
+    {
+      "text": "Output contains TypeScript test syntax",
+      "passed": true,
+      "evidence": "Report contains describe/it blocks with When/Then naming and expect() assertions"
+    },
+    {
+      "text": "Output does NOT contain Go/Angular/Flutter syntax",
+      "passed": true,
+      "evidence": "0 matches for func Test, TestBed, testWidgets"
+    },
+    {
+      "text": "Identifies Critical or High gap for controller",
+      "passed": true,
+      "evidence": "Critical: HTTP controller with no test file at all"
+    }
+  ],
+  "summary": {"pass_rate": 1.0, "passed": 3, "failed": 0, "total": 3}
+}

@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "Separate TypeScript and Go sections", "passed": true, "evidence": "## TypeScript — upload.controller.ts and ## Go — resize.go sections"},
+    {"text": "TypeScript section uses describe/it", "passed": true, "evidence": "describe('uploadFile', () => { it('sends a response with a key..."},
+    {"text": "Go section uses func Test*", "passed": true, "evidence": "func TestResizeImage_ValidInputs_ReturnsNil(t *testing.T)"}
+  ],
+  "summary": {"pass_rate": 1.0, "passed": 3, "failed": 0, "total": 3}
+}

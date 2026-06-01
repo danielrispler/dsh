@@ -1,0 +1,4608 @@
+diff --git a/docs/adr/0003-iframe-auth-via-httponly-cookie.md b/docs/adr/0003-iframe-auth-via-httponly-cookie.md
+new file mode 100644
+index 0000000..dd02351
+--- /dev/null
++++ b/docs/adr/0003-iframe-auth-via-httponly-cookie.md
+@@ -0,0 +1,38 @@
++# ADR 0003 — Iframe authenticates via browser-attached HttpOnly cookie
++
++## Status
++
++Accepted — 2026-06-01.
++
++## Context
++
++The editor is embedded as an iframe inside the parent host app (Angular). User auth in the host environment is represented by `ztube-token`, an **HttpOnly** cookie set by the host's auth flow on the registrable domain shared by host and editor.
++
++The editor server makes upstream calls to Core (`/private/channels/:id/play`) that require this cookie. So the token has to reach the editor server on every preview request.
++
++Earlier implementation: the Angular parent attempted `document.cookie.match(/ztube-token=…/)` and forwarded the value to the iframe via `EDITOR_SET_AUTH`. The iframe stored it in a ref and sent it on each request as `x-ztube-token`. The server read the header and forwarded as `Cookie: ztube-token=…` to Core.
++
++This was broken in prod by definition: HttpOnly cookies are invisible to `document.cookie`. The parent always read an empty string and the server always received an empty token. It only worked in dev with a non-HttpOnly cookie.
++
++## Decision
++
++Drop all JavaScript handling of the token. The editor and its server are served from the same registrable domain (prod: gateway routes both; dev: vite proxies `/editor/*` from `localhost:3000` to `localhost:4001`). Same-origin `fetch` from the iframe carries the HttpOnly cookie automatically. The server reads `ztube-token` from the inbound `Cookie` header and `HttpPreviewSourceAdapter` forwards it as `Cookie: ztube-token=…` on the outbound Core call.
++
++Concretely:
++
++- `EDITOR_SET_AUTH` message, the `authTokenRef` in `useEditorPostMessage`, the `authToken` parameter on `resolvePreviewSource` / `addPreviewItemToEditor`, the `x-ztube-token` request header — all deleted.
++- The Angular parent no longer reads or posts the cookie.
++- Server controller reads `request.headers.cookie` and parses `ztube-token` inline (no `@fastify/cookie` dep added).
++
++## Alternatives Considered
++
++1. **Keep `EDITOR_SET_AUTH` but make the cookie non-HttpOnly.** Rejected — weakens XSS posture for no operational benefit, because same-domain deployment makes browser attachment trivial.
++2. **Server-to-server token exchange (OAuth, signed introspection).** Rejected — adds an upstream dependency and a new credential store for a problem the browser already solves under same-domain hosting.
++3. **`@fastify/cookie` plugin for parsing.** Rejected — one regex on `request.headers.cookie` suffices; adding a dep contradicts the closed-network "minimize external surface" posture.
++
++## Consequences
++
++- The editor server **must** be served on the same registrable domain as the parent host. Cross-domain embedding is out of scope under this design and would require a new auth scheme (e.g., short-lived bearer token minted by the host and posted in over a confirmed-origin channel).
++- Local dev requires the vite proxy: any non-proxied fetch (e.g. directly to `http://localhost:4001`) is cross-origin and will not carry `localhost` cookies unless `credentials: 'include'` is set explicitly with CORS credentials configured server-side. The current setup uses `credentials: 'same-origin'` (the `fetch` default), which is sufficient via the proxy.
++- The iframe contract surface shrinks (one fewer message type, one fewer schema).
++- Token rotation, revocation, and storage become entirely the host's concern. The editor never touches the value.
+diff --git a/docs/adr/0004-server-http-schemas-in-shared-contract-package.md b/docs/adr/0004-server-http-schemas-in-shared-contract-package.md
+new file mode 100644
+index 0000000..a32aba7
+--- /dev/null
++++ b/docs/adr/0004-server-http-schemas-in-shared-contract-package.md
+@@ -0,0 +1,55 @@
++# 0004 — Server HTTP schemas live in the shared contract package
++
++- Status: Accepted
++- Date: 2026-06-01
++
++## Context
++
++`@video-editor/contract` is shared with an external (parent app) team that embeds the editor iframe. The package already owns:
++
++- iframe postMessage schemas (parent ↔ editor)
++- AMQP event envelopes (server → RabbitMQ)
++
++`apps/server` previously kept its own HTTP route schemas next to each feature (`features/<feature>/adapters/inbound/http/*.schema.ts`) plus value types in `shared/domain/` (`OverlayType`, `TimeRange`, `VideoMetadata`, the `render-types` barrel). That follows the usual hexagonal convention "each feature owns its schemas".
++
++But:
++
++1. External teams reading `@video-editor/contract` had no way to tell what's "their" surface area vs the editor team's. Anything dragged in via grep looked equally public.
++2. The editor frontend and the editor server share the same schemas (`designPayloadSchema`, `editVideoRequestSchema`, etc.) but historically duplicated or copy-pasted the types. A single source of truth was missing.
++3. New hires kept asking "where do I find the type for X?". Three plausible answers per feature.
++
++## Decision
++
++Move every HTTP route schema and every shared HTTP value type out of `apps/server` and into `@video-editor/contract/internal/<feature>`. The contract package becomes the **single home for all editor-team type contracts**, organised into four explicit buckets:
++
++| Bucket | Subpath | Audience |
++|---|---|---|
++| Parent → editor | `iframe/from-parent` | External + editor frontend |
++| Editor → parent | `iframe/to-parent` | External + editor frontend |
++| RabbitMQ events | `events` | External consumers |
++| Editor server HTTP | `internal/<feature>` | **`apps/server` only** |
++
++External teams know on sight that `/internal/*` is not for them.
++
++All TS types in the package come from `z.infer<typeof schema>`.
++
++## Consequences
++
++**Good**
++
++- One place to look for any type contract owned by the editor team.
++- External teams can't accidentally couple to `/internal/*` — the subpath name is the warning.
++- `apps/server` and `apps/frontend` can both import the same `designPayloadSchema`, `editVideoRequestSchema`, `OverlayType`, etc. without duplication.
++- No drift between Zod schema and TS type — `z.infer` is the only source.
++
++**Bad / Surprising**
++
++- Breaks the usual hexagonal "each feature owns its schemas" guideline. `apps/server`'s features now point outward at the contract package for their inbound HTTP schemas.
++- Adds a hard build-order edge: `@video-editor/contract` must build before `apps/server` type-checks. (Already true for the iframe/events subpaths — same build step.)
++- The contract package no longer maps 1:1 to "external surface area". `/internal/*` is internal-only but lives in the same `node_modules/@video-editor/contract` install.
++
++## Alternatives Considered
++
++1. **Keep schemas in `apps/server`, add CLAUDE.md notes about scope.** Rejected — relies on the external team reading docs instead of seeing the boundary in the import path.
++2. **Create a separate `@video-editor/server-contract` workspace package.** Rejected — adds workspace overhead for a package that no other workspace imports. The `/internal/*` subpath gives the same isolation with one less package.
++3. **Inline shared schemas in `apps/frontend` and `apps/server` independently.** Rejected — that's the duplication problem we already have.
+diff --git a/packages/contract/src/events/__tests__/export.test.ts b/packages/contract/src/events/__tests__/export.test.ts
+new file mode 100644
+index 0000000..f99fa01
+--- /dev/null
++++ b/packages/contract/src/events/__tests__/export.test.ts
+@@ -0,0 +1,114 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++import { EXCHANGE_NAME } from "../envelope.js";
++import {
++	EXPORT_COMPLETED,
++	EXPORT_COMPLETED_V1,
++	EXPORT_FAILED,
++	EXPORT_FAILED_V1,
++	EXPORT_STARTED,
++	EXPORT_STARTED_V1,
++	exportCompletedEnvelopeSchema,
++	exportFailedEnvelopeSchema,
++	exportStartedEnvelopeSchema,
++} from "../export.js";
++import {
++	mockExportCompletedEnvelope,
++	mockExportFailedEnvelope,
++	mockExportStartedEnvelope,
++} from "../mocks.js";
++
++describe("event routing keys", () => {
++	it("uses lowercase domain.action pattern", () => {
++		assert.equal(EXPORT_STARTED, "export.started");
++		assert.equal(EXPORT_COMPLETED, "export.completed");
++		assert.equal(EXPORT_FAILED, "export.failed");
++	});
++
++	it("starts at version 1", () => {
++		assert.equal(EXPORT_STARTED_V1, 1);
++		assert.equal(EXPORT_COMPLETED_V1, 1);
++		assert.equal(EXPORT_FAILED_V1, 1);
++	});
++});
++
++describe("exportStartedEnvelopeSchema", () => {
++	it("accepts the v1 mock envelope", () => {
++		assert.equal(exportStartedEnvelopeSchema.safeParse(mockExportStartedEnvelope).success, true);
++	});
++
++	it("rejects an envelope missing eventVersion", () => {
++		const { eventVersion: _v, ...rest } = mockExportStartedEnvelope;
++		assert.equal(exportStartedEnvelopeSchema.safeParse(rest).success, false);
++	});
++
++	it("rejects envelope with non-positive eventVersion", () => {
++		assert.equal(
++			exportStartedEnvelopeSchema.safeParse({ ...mockExportStartedEnvelope, eventVersion: 0 })
++				.success,
++			false,
++		);
++	});
++
++	it("rejects envelope whose data is missing jobId", () => {
++		const { jobId: _j, ...restData } = mockExportStartedEnvelope.data;
++		assert.equal(
++			exportStartedEnvelopeSchema.safeParse({ ...mockExportStartedEnvelope, data: restData })
++				.success,
++			false,
++		);
++	});
++});
++
++describe("exportCompletedEnvelopeSchema", () => {
++	it("accepts the v1 mock envelope", () => {
++		assert.equal(
++			exportCompletedEnvelopeSchema.safeParse(mockExportCompletedEnvelope).success,
++			true,
++		);
++	});
++
++	it("rejects non-http url", () => {
++		assert.equal(
++			exportCompletedEnvelopeSchema.safeParse({
++				...mockExportCompletedEnvelope,
++				data: { ...mockExportCompletedEnvelope.data, url: "ftp://x/y.mp4" },
++			}).success,
++			false,
++		);
++	});
++});
++
++describe("exportFailedEnvelopeSchema", () => {
++	it("accepts the v1 mock envelope", () => {
++		assert.equal(exportFailedEnvelopeSchema.safeParse(mockExportFailedEnvelope).success, true);
++	});
++
++	it("rejects empty error string", () => {
++		assert.equal(
++			exportFailedEnvelopeSchema.safeParse({
++				...mockExportFailedEnvelope,
++				data: { ...mockExportFailedEnvelope.data, error: "" },
++			}).success,
++			false,
++		);
++	});
++});
++
++describe("envelope strictness", () => {
++	it("rejects extra top-level fields", () => {
++		assert.equal(
++			exportStartedEnvelopeSchema.safeParse({
++				...mockExportStartedEnvelope,
++				extraneous: "no",
++			}).success,
++			false,
++		);
++	});
++});
++
++describe("EXCHANGE_NAME", () => {
++	it("is the public 'video-editor' topic exchange name", () => {
++		assert.equal(EXCHANGE_NAME, "video-editor");
++	});
++});
+diff --git a/packages/contract/src/iframe/from-parent/__tests__/schemas.test.ts b/packages/contract/src/iframe/from-parent/__tests__/schemas.test.ts
+new file mode 100644
+index 0000000..cf68509
+--- /dev/null
++++ b/packages/contract/src/iframe/from-parent/__tests__/schemas.test.ts
+@@ -0,0 +1,247 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++import {
++	mockAudioRangeMessage,
++	mockClearProjectMessage,
++	mockMediaHlsMessage,
++	mockMediaMp4Message,
++	mockRecordingRangeHlsMessage,
++	mockRecordingRangeNoPlaybackMessage,
++} from "../mocks.js";
++import { parentToEditorMessageSchema } from "../schemas.js";
++
++const baseRecordingPayload = {
++	kind: "recording-range" as const,
++	channelId: "20574",
++	startTimeMs: 1000,
++	endTimeMs: 2000,
++	durationMs: 1000,
++	playback: { kind: "hls" as const, src: "https://example.com/index.m3u8" },
++};
++
++const baseAudioPayload = {
++	kind: "audio-range" as const,
++	audioId: "a1",
++	startTimeMs: 1000,
++	endTimeMs: 2000,
++	durationMs: 1000,
++	playback: { kind: "audio" as const, src: "https://example.com/track.m4a" },
++};
++
++const MAX_MS = 1000 * 60 * 60; // 1 hour
++
++describe("from-parent — business rules", () => {
++	it("rejects unsafe (non-http/https) src in hls playback", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				...baseRecordingPayload,
++				playback: { kind: "hls", src: "file:///etc/passwd" },
++			},
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("rejects non-http/https src in media playback", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				kind: "media",
++				mediaId: "m-1",
++				playback: { kind: "mp4", src: "javascript:alert(1)" },
++			},
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("rejects recording-range durationMs exceeding 1 hour", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				...baseRecordingPayload,
++				durationMs: MAX_MS + 1,
++				endTimeMs: baseRecordingPayload.startTimeMs + MAX_MS + 1,
++			},
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("accepts recording-range durationMs exactly at the 1-hour cap", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				...baseRecordingPayload,
++				durationMs: MAX_MS,
++				endTimeMs: baseRecordingPayload.startTimeMs + MAX_MS,
++			},
++		});
++		assert.equal(result.success, true);
++	});
++
++	it("rejects audio-range durationMs exceeding 1 hour", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				...baseAudioPayload,
++				durationMs: MAX_MS + 1,
++			},
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("rejects media durationMs exceeding 1 hour", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				kind: "media",
++				mediaId: "m-1",
++				durationMs: MAX_MS + 1,
++				playback: { kind: "mp4", src: "https://example.com/v.mp4" },
++			},
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("rejects audio-range with non-hls src that is not audio media", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				...baseAudioPayload,
++				playback: { kind: "audio", src: "https://example.com/track.mp4" },
++			},
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("accepts audio-range with hls src that looks like video", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				...baseAudioPayload,
++				playback: { kind: "hls", src: "https://example.com/video.m3u8" },
++			},
++		});
++		assert.equal(result.success, true);
++	});
++});
++
++describe("from-parent — schema invariants", () => {
++	it("parses valid add-preview-item messages", () => {
++		assert.equal(parentToEditorMessageSchema.safeParse(mockRecordingRangeHlsMessage).success, true);
++		assert.equal(parentToEditorMessageSchema.safeParse(mockMediaMp4Message).success, true);
++		assert.equal(parentToEditorMessageSchema.safeParse(mockMediaHlsMessage).success, true);
++		assert.equal(parentToEditorMessageSchema.safeParse(mockAudioRangeMessage).success, true);
++	});
++
++	it("accepts recording-range without playback (editor resolves HLS URL)", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse(mockRecordingRangeNoPlaybackMessage).success,
++			true,
++		);
++	});
++
++	it("parses valid clear-project messages", () => {
++		assert.equal(parentToEditorMessageSchema.safeParse(mockClearProjectMessage).success, true);
++	});
++
++	it("rejects invalid message shapes", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				requestId: "bad",
++			}).success,
++			false,
++		);
++	});
++
++	it("rejects durationMs = 0 for recording-range", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: { ...baseRecordingPayload, durationMs: 0 },
++			}).success,
++			false,
++		);
++	});
++
++	it("rejects durationMs = 0 for audio-range", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: { ...baseAudioPayload, durationMs: 0 },
++			}).success,
++			false,
++		);
++	});
++
++	it("rejects endTimeMs < startTimeMs for recording-range", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: { ...baseRecordingPayload, startTimeMs: 100, endTimeMs: 99 },
++			}).success,
++			false,
++		);
++	});
++
++	it("rejects endTimeMs === startTimeMs (zero duration range) for recording-range", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: { ...baseRecordingPayload, startTimeMs: 100, endTimeMs: 100 },
++			}).success,
++			false,
++		);
++	});
++
++	it("rejects endTimeMs === startTimeMs for audio-range", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: { ...baseAudioPayload, startTimeMs: 100, endTimeMs: 100 },
++			}).success,
++			false,
++		);
++	});
++
++	it("accepts sourceOffsetMs = 0 (valid boundary)", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: { ...baseRecordingPayload, sourceOffsetMs: 0 },
++			}).success,
++			true,
++		);
++	});
++
++	it("rejects sourceOffsetMs > durationMs", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: {
++					...baseRecordingPayload,
++					durationMs: 1000,
++					sourceOffsetMs: 1001,
++				},
++			}).success,
++			false,
++		);
++	});
++
++	it("keeps all exported mocks schema-valid", () => {
++		for (const message of [
++			mockRecordingRangeHlsMessage,
++			mockRecordingRangeNoPlaybackMessage,
++			mockMediaMp4Message,
++			mockMediaHlsMessage,
++			mockAudioRangeMessage,
++			mockClearProjectMessage,
++		]) {
++			assert.equal(
++				parentToEditorMessageSchema.safeParse(message).success,
++				true,
++				`Mock failed schema validation: ${JSON.stringify(message)}`,
++			);
++		}
++	});
++});
+diff --git a/packages/contract/src/iframe/from-parent/helpers.ts b/packages/contract/src/iframe/from-parent/helpers.ts
+new file mode 100644
+index 0000000..75eff4f
+--- /dev/null
++++ b/packages/contract/src/iframe/from-parent/helpers.ts
+@@ -0,0 +1,7 @@
++import { type ParentToEditorMessage, parentToEditorMessageSchema } from "./schemas.js";
++
++export const isParentToEditorMessage = (value: unknown): value is ParentToEditorMessage =>
++	parentToEditorMessageSchema.safeParse(value).success;
++
++export const parseParentToEditorMessage = (value: unknown): ParentToEditorMessage =>
++	parentToEditorMessageSchema.parse(value);
+diff --git a/packages/contract/src/iframe/from-parent/index.ts b/packages/contract/src/iframe/from-parent/index.ts
+new file mode 100644
+index 0000000..ef0cc76
+--- /dev/null
++++ b/packages/contract/src/iframe/from-parent/index.ts
+@@ -0,0 +1,28 @@
++export { isParentToEditorMessage, parseParentToEditorMessage } from "./helpers.js";
++export type {
++	AudioPlayback,
++	AudioRangePayload,
++	EditorAddPreviewItemMessage,
++	EditorClearProjectMessage,
++	HlsPlayback,
++	MediaPayload,
++	MediaPlayback,
++	ParentToEditorMessage,
++	Playback,
++	PreviewItemPayload,
++	RecordingRangePayload,
++} from "./schemas.js";
++export {
++	audioPlaybackSchema,
++	audioRangePayloadSchema,
++	editorAddPreviewItemMessageSchema,
++	editorClearProjectMessageSchema,
++	hlsPlaybackSchema,
++	MAX_PREVIEW_DURATION_MS,
++	mediaPayloadSchema,
++	mediaPlaybackSchema,
++	parentToEditorMessageSchema,
++	playbackSchema,
++	previewItemPayloadSchema,
++	recordingRangePayloadSchema,
++} from "./schemas.js";
+diff --git a/packages/contract/src/iframe/from-parent/mocks.ts b/packages/contract/src/iframe/from-parent/mocks.ts
+new file mode 100644
+index 0000000..98c1917
+--- /dev/null
++++ b/packages/contract/src/iframe/from-parent/mocks.ts
+@@ -0,0 +1,88 @@
++import type { EditorClearProjectMessage, ParentToEditorMessage } from "./schemas.js";
++
++const mockStartTimeMs = 1778412276333;
++const mockEndTimeMs = 1778412813617;
++const mockDurationMs = mockEndTimeMs - mockStartTimeMs;
++
++export const mockRecordingRangeHlsMessage: ParentToEditorMessage = {
++	type: "EDITOR_ADD_PREVIEW_ITEM",
++	requestId: "mock-recording-range-hls",
++	payload: {
++		kind: "recording-range",
++		channelId: "20574",
++		startTimeMs: mockStartTimeMs,
++		endTimeMs: mockEndTimeMs,
++		durationMs: mockDurationMs,
++		playback: {
++			kind: "hls",
++			src: "https://example.com/api/editor/hls-preview/jobs/mock-recording/index.m3u8",
++		},
++		sourceOffsetMs: 6333,
++		posterSrc: "https://example.com/mock-recording-poster.jpg",
++	},
++};
++
++export const mockMediaMp4Message: ParentToEditorMessage = {
++	type: "EDITOR_ADD_PREVIEW_ITEM",
++	requestId: "mock-media-mp4",
++	payload: {
++		kind: "media",
++		mediaId: "media-1001",
++		durationMs: 120000,
++		playback: {
++			kind: "mp4",
++			src: "https://example.com/media/mock-video.mp4",
++		},
++		posterSrc: "https://example.com/media/mock-video-poster.jpg",
++	},
++};
++
++export const mockMediaHlsMessage: ParentToEditorMessage = {
++	type: "EDITOR_ADD_PREVIEW_ITEM",
++	requestId: "mock-media-hls",
++	payload: {
++		kind: "media",
++		mediaId: "media-1002",
++		durationMs: 180000,
++		playback: {
++			kind: "hls",
++			src: "https://example.com/media/mock-video/index.m3u8",
++		},
++		posterSrc: "https://example.com/media/mock-video-hls-poster.jpg",
++	},
++};
++
++export const mockAudioRangeMessage: ParentToEditorMessage = {
++	type: "EDITOR_ADD_PREVIEW_ITEM",
++	requestId: "mock-audio-range",
++	payload: {
++		kind: "audio-range",
++		audioId: "audio-501",
++		startTimeMs: mockStartTimeMs,
++		endTimeMs: mockEndTimeMs,
++		durationMs: mockDurationMs,
++		playback: {
++			kind: "audio",
++			src: "https://example.com/audio/mock-track.m4a",
++		},
++		sourceOffsetMs: 6333,
++	},
++};
++
++export const mockRecordingRangeNoPlaybackMessage: ParentToEditorMessage = {
++	type: "EDITOR_ADD_PREVIEW_ITEM",
++	requestId: "mock-recording-range-no-playback",
++	payload: {
++		kind: "recording-range",
++		channelId: "20574",
++		startTimeMs: mockStartTimeMs,
++		endTimeMs: mockEndTimeMs,
++		durationMs: mockDurationMs,
++		sourceOffsetMs: 6333,
++	},
++};
++
++export const mockClearProjectMessage: EditorClearProjectMessage = {
++	type: "EDITOR_CLEAR_PROJECT",
++	requestId: "mock-clear-project",
++};
+diff --git a/packages/contract/src/iframe/from-parent/schemas.ts b/packages/contract/src/iframe/from-parent/schemas.ts
+new file mode 100644
+index 0000000..2fb3d73
+--- /dev/null
++++ b/packages/contract/src/iframe/from-parent/schemas.ts
+@@ -0,0 +1,163 @@
++import { z } from "zod";
++
++export const MAX_PREVIEW_DURATION_MS = 1000 * 60 * 60 * 1;
++
++const positiveNumber = z.number().finite().min(0);
++const positiveDuration = z.number().finite().positive();
++const nonEmptyString = z.string().trim().min(1);
++const requestIdSchema = z.string().trim().min(1).optional();
++
++const safeMediaUrl = (src: string) => /^https?:\/\//i.test(src);
++const likelyAudioSrc = (src: string) => /\.(m3u8|mp3|wav|m4a|aac|ogg)(\?|$)/i.test(src);
++const safeSrc = nonEmptyString.refine(safeMediaUrl, {
++	message: "src must be an http/https URL",
++});
++
++export const hlsPlaybackSchema = z.strictObject({
++	kind: z.literal("hls"),
++	src: safeSrc,
++});
++
++export const mediaPlaybackSchema = z.strictObject({
++	kind: z.union([z.literal("mp4"), z.literal("hls")]),
++	src: safeSrc,
++});
++
++export const audioPlaybackSchema = z.strictObject({
++	kind: z.union([z.literal("audio"), z.literal("hls")]),
++	src: safeSrc,
++});
++
++export const playbackSchema = z.union([
++	hlsPlaybackSchema,
++	mediaPlaybackSchema,
++	audioPlaybackSchema,
++]);
++
++export const recordingRangePayloadSchema = z
++	.strictObject({
++		kind: z.literal("recording-range"),
++		channelId: nonEmptyString,
++		startTimeMs: positiveNumber,
++		endTimeMs: positiveNumber,
++		durationMs: positiveDuration,
++		/** When absent, the editor resolves the HLS playlist URL via POST /api/editor/preview-source. */
++		playback: hlsPlaybackSchema.optional(),
++		sourceOffsetMs: positiveNumber.optional(),
++		posterSrc: nonEmptyString.optional(),
++		name: z.string().optional(),
++	})
++	.superRefine((value, ctx) => {
++		if (value.endTimeMs <= value.startTimeMs) {
++			ctx.addIssue({
++				code: z.ZodIssueCode.custom,
++				message: "endTimeMs must be greater than startTimeMs",
++				path: ["endTimeMs"],
++			});
++		}
++
++		if (value.sourceOffsetMs !== undefined && value.sourceOffsetMs > value.durationMs) {
++			ctx.addIssue({
++				code: z.ZodIssueCode.custom,
++				message: "sourceOffsetMs must be less than or equal to durationMs",
++				path: ["sourceOffsetMs"],
++			});
++		}
++	})
++	.refine((p) => p.durationMs <= MAX_PREVIEW_DURATION_MS, {
++		message: "durationMs exceeds the maximum supported preview duration",
++		path: ["durationMs"],
++	});
++
++export const mediaPayloadSchema = z
++	.strictObject({
++		kind: z.literal("media"),
++		mediaId: nonEmptyString,
++		durationMs: positiveNumber.optional(),
++		playback: mediaPlaybackSchema,
++		posterSrc: nonEmptyString.optional(),
++		name: z.string().optional(),
++	})
++	.refine((p) => (p.durationMs ?? 0) <= MAX_PREVIEW_DURATION_MS, {
++		message: "durationMs exceeds the maximum supported preview duration",
++		path: ["durationMs"],
++	});
++
++export const audioRangePayloadSchema = z
++	.strictObject({
++		kind: z.literal("audio-range"),
++		audioId: nonEmptyString,
++		startTimeMs: positiveNumber.optional(),
++		endTimeMs: positiveNumber.optional(),
++		durationMs: positiveDuration,
++		playback: audioPlaybackSchema,
++		sourceOffsetMs: positiveNumber.optional(),
++		name: z.string().optional(),
++	})
++	.superRefine((value, ctx) => {
++		if (
++			value.startTimeMs !== undefined &&
++			value.endTimeMs !== undefined &&
++			value.endTimeMs <= value.startTimeMs
++		) {
++			ctx.addIssue({
++				code: z.ZodIssueCode.custom,
++				message: "endTimeMs must be greater than startTimeMs",
++				path: ["endTimeMs"],
++			});
++		}
++
++		if (value.sourceOffsetMs !== undefined && value.sourceOffsetMs > value.durationMs) {
++			ctx.addIssue({
++				code: z.ZodIssueCode.custom,
++				message: "sourceOffsetMs must be less than or equal to durationMs",
++				path: ["sourceOffsetMs"],
++			});
++		}
++
++		if (value.playback.kind !== "hls" && !likelyAudioSrc(value.playback.src)) {
++			ctx.addIssue({
++				code: z.ZodIssueCode.custom,
++				message: "audio-range src must point to audio or HLS media",
++				path: ["playback", "src"],
++			});
++		}
++	})
++	.refine((p) => p.durationMs <= MAX_PREVIEW_DURATION_MS, {
++		message: "durationMs exceeds the maximum supported preview duration",
++		path: ["durationMs"],
++	});
++
++export const previewItemPayloadSchema = z.union([
++	recordingRangePayloadSchema,
++	mediaPayloadSchema,
++	audioRangePayloadSchema,
++]);
++
++export const editorAddPreviewItemMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_ADD_PREVIEW_ITEM"),
++	requestId: requestIdSchema,
++	payload: previewItemPayloadSchema,
++});
++
++export const editorClearProjectMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_CLEAR_PROJECT"),
++	requestId: requestIdSchema,
++});
++
++export const parentToEditorMessageSchema = z.union([
++	editorAddPreviewItemMessageSchema,
++	editorClearProjectMessageSchema,
++]);
++
++export type HlsPlayback = z.infer<typeof hlsPlaybackSchema>;
++export type MediaPlayback = z.infer<typeof mediaPlaybackSchema>;
++export type AudioPlayback = z.infer<typeof audioPlaybackSchema>;
++export type Playback = z.infer<typeof playbackSchema>;
++export type RecordingRangePayload = z.infer<typeof recordingRangePayloadSchema>;
++export type MediaPayload = z.infer<typeof mediaPayloadSchema>;
++export type AudioRangePayload = z.infer<typeof audioRangePayloadSchema>;
++export type PreviewItemPayload = z.infer<typeof previewItemPayloadSchema>;
++export type EditorAddPreviewItemMessage = z.infer<typeof editorAddPreviewItemMessageSchema>;
++export type EditorClearProjectMessage = z.infer<typeof editorClearProjectMessageSchema>;
++export type ParentToEditorMessage = z.infer<typeof parentToEditorMessageSchema>;
+diff --git a/packages/contract/src/iframe/to-parent/__tests__/schemas.test.ts b/packages/contract/src/iframe/to-parent/__tests__/schemas.test.ts
+new file mode 100644
+index 0000000..efc1103
+--- /dev/null
++++ b/packages/contract/src/iframe/to-parent/__tests__/schemas.test.ts
+@@ -0,0 +1,98 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++import { mockMediaSavedMessage } from "../mocks.js";
++import { editorToParentMessageSchema } from "../schemas.js";
++
++describe("to-parent — editorMediaSavedMessageSchema", () => {
++	const validMsg = {
++		type: "EDITOR_MEDIA_SAVED",
++		mediaId: "550e8400-e29b-41d4-a716-446655440000",
++		mediaName: "My Clip",
++		downloadToComputer: true,
++		saveToPersonalChannel: false,
++		selectedUnitChannelIds: [],
++		url: "https://example.com/output/video.mp4",
++		exportType: "mp4",
++		items: [
++			{ type: "recording", id: "ch-1", from: 0, to: 5000 },
++			{ type: "audio", id: "aud-1", from: 1000, to: 4000 },
++			{ type: "image", id: "img-1" },
++			{ type: "clip", id: "media-1" },
++		],
++	};
++
++	it("accepts a valid EDITOR_MEDIA_SAVED message", () => {
++		assert.equal(editorToParentMessageSchema.safeParse(validMsg).success, true);
++	});
++
++	it("rejects missing mediaName", () => {
++		const { mediaName: _m, ...rest } = validMsg;
++		assert.equal(editorToParentMessageSchema.safeParse(rest).success, false);
++	});
++
++	it("rejects non-http url", () => {
++		assert.equal(
++			editorToParentMessageSchema.safeParse({ ...validMsg, url: "ftp://bad.com/x.mp4" }).success,
++			false,
++		);
++	});
++
++	it("rejects unknown exportType", () => {
++		assert.equal(
++			editorToParentMessageSchema.safeParse({ ...validMsg, exportType: "json" }).success,
++			false,
++		);
++	});
++
++	it("rejects recording item missing from/to", () => {
++		assert.equal(
++			editorToParentMessageSchema.safeParse({
++				...validMsg,
++				items: [{ type: "recording", id: "ch-1" }],
++			}).success,
++			false,
++		);
++	});
++
++	it("accepts empty items array", () => {
++		assert.equal(editorToParentMessageSchema.safeParse({ ...validMsg, items: [] }).success, true);
++	});
++
++	it("rejects EDITOR_MEDIA_SAVED without mediaId", () => {
++		const { mediaId: _m, ...withoutMediaId } = validMsg as typeof validMsg & { mediaId: string };
++		assert.equal(editorToParentMessageSchema.safeParse(withoutMediaId).success, false);
++	});
++
++	it("rejects EDITOR_MEDIA_SAVED without selectedUnitChannelIds", () => {
++		const { selectedUnitChannelIds: _s, ...withoutChannels } = validMsg as typeof validMsg & {
++			selectedUnitChannelIds: string[];
++		};
++		assert.equal(editorToParentMessageSchema.safeParse(withoutChannels).success, false);
++	});
++
++	it("accepts EDITOR_MEDIA_SAVED with mediaId and selectedUnitChannelIds", () => {
++		assert.equal(
++			editorToParentMessageSchema.safeParse({
++				...validMsg,
++				mediaId: "550e8400-e29b-41d4-a716-446655440000",
++				selectedUnitChannelIds: ["ch-1", "ch-2"],
++			}).success,
++			true,
++		);
++	});
++
++	it("accepts EDITOR_MEDIA_SAVED with empty selectedUnitChannelIds", () => {
++		assert.equal(
++			editorToParentMessageSchema.safeParse({
++				...validMsg,
++				mediaId: "550e8400-e29b-41d4-a716-446655440000",
++				selectedUnitChannelIds: [],
++			}).success,
++			true,
++		);
++	});
++
++	it("keeps the exported mock schema-valid", () => {
++		assert.equal(editorToParentMessageSchema.safeParse(mockMediaSavedMessage).success, true);
++	});
++});
+diff --git a/packages/contract/src/iframe/to-parent/helpers.ts b/packages/contract/src/iframe/to-parent/helpers.ts
+new file mode 100644
+index 0000000..3e19a88
+--- /dev/null
++++ b/packages/contract/src/iframe/to-parent/helpers.ts
+@@ -0,0 +1,51 @@
++import type { SavedMediaItem } from "../../shared/saved-media.js";
++import type {
++	EditorMediaSavedMessage,
++	EditorPreviewItemAddedMessage,
++	EditorPreviewItemRejectedMessage,
++	EditorProjectClearedMessage,
++} from "./schemas.js";
++
++export const createPreviewItemAddedMessage = (
++	itemId: string,
++	requestId?: string,
++): EditorPreviewItemAddedMessage => ({
++	type: "EDITOR_PREVIEW_ITEM_ADDED",
++	requestId,
++	itemId,
++});
++
++export const createPreviewItemRejectedMessage = (
++	reason: string,
++	requestId?: string,
++): EditorPreviewItemRejectedMessage => ({
++	type: "EDITOR_PREVIEW_ITEM_REJECTED",
++	requestId,
++	reason,
++});
++
++export const createProjectClearedMessage = (requestId?: string): EditorProjectClearedMessage => ({
++	type: "EDITOR_PROJECT_CLEARED",
++	requestId,
++});
++
++export const createMediaSavedMessage = (
++	mediaName: string,
++	downloadToComputer: boolean,
++	saveToPersonalChannel: boolean,
++	url: string,
++	exportType: "mp4" | "webp",
++	items: SavedMediaItem[],
++	mediaId: string,
++	selectedUnitChannelIds: string[],
++): EditorMediaSavedMessage => ({
++	type: "EDITOR_MEDIA_SAVED",
++	mediaId,
++	mediaName,
++	downloadToComputer,
++	saveToPersonalChannel,
++	selectedUnitChannelIds,
++	url,
++	exportType,
++	items,
++});
+diff --git a/packages/contract/src/iframe/to-parent/index.ts b/packages/contract/src/iframe/to-parent/index.ts
+new file mode 100644
+index 0000000..60e6be6
+--- /dev/null
++++ b/packages/contract/src/iframe/to-parent/index.ts
+@@ -0,0 +1,27 @@
++export type { SavedMediaItem, SavedMediaPayload } from "../../shared/saved-media.js";
++export {
++	savedMediaItemSchema,
++	savedMediaPayloadSchema,
++} from "../../shared/saved-media.js";
++export {
++	createMediaSavedMessage,
++	createPreviewItemAddedMessage,
++	createPreviewItemRejectedMessage,
++	createProjectClearedMessage,
++} from "./helpers.js";
++export type {
++	EditorMediaSavedMessage,
++	EditorPreviewItemAddedMessage,
++	EditorPreviewItemRejectedMessage,
++	EditorProjectClearedMessage,
++	EditorReadyMessage,
++	EditorToParentMessage,
++} from "./schemas.js";
++export {
++	editorMediaSavedMessageSchema,
++	editorPreviewItemAddedMessageSchema,
++	editorPreviewItemRejectedMessageSchema,
++	editorProjectClearedMessageSchema,
++	editorReadyMessageSchema,
++	editorToParentMessageSchema,
++} from "./schemas.js";
+diff --git a/packages/contract/src/iframe/to-parent/mocks.ts b/packages/contract/src/iframe/to-parent/mocks.ts
+new file mode 100644
+index 0000000..11e0b40
+--- /dev/null
++++ b/packages/contract/src/iframe/to-parent/mocks.ts
+@@ -0,0 +1,18 @@
++import type { EditorMediaSavedMessage } from "./schemas.js";
++
++export const mockMediaSavedMessage: EditorMediaSavedMessage = {
++	type: "EDITOR_MEDIA_SAVED",
++	mediaId: "550e8400-e29b-41d4-a716-446655440000",
++	mediaName: "My Edited Clip",
++	downloadToComputer: true,
++	saveToPersonalChannel: false,
++	selectedUnitChannelIds: [],
++	url: "https://example.com/output/mock-video.mp4",
++	exportType: "mp4",
++	items: [
++		{ type: "recording", id: "20574", from: 0, to: 537284 },
++		{ type: "audio", id: "audio-501", from: 0, to: 537284 },
++		{ type: "image", id: "img-item-1" },
++		{ type: "clip", id: "media-1001" },
++	],
++};
+diff --git a/packages/contract/src/iframe/to-parent/schemas.ts b/packages/contract/src/iframe/to-parent/schemas.ts
+new file mode 100644
+index 0000000..0e14c1e
+--- /dev/null
++++ b/packages/contract/src/iframe/to-parent/schemas.ts
+@@ -0,0 +1,53 @@
++import { z } from "zod";
++import { savedMediaPayloadSchema } from "../../shared/saved-media.js";
++
++const nonEmptyString = z.string().trim().min(1);
++const requestIdSchema = z.string().trim().min(1).optional();
++const safeMediaUrl = (src: string) => /^https?:\/\//i.test(src);
++const safeSrc = nonEmptyString.refine(safeMediaUrl, {
++	message: "src must be an http/https URL",
++});
++
++export const editorPreviewItemAddedMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_PREVIEW_ITEM_ADDED"),
++	requestId: requestIdSchema,
++	itemId: nonEmptyString,
++});
++
++export const editorPreviewItemRejectedMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_PREVIEW_ITEM_REJECTED"),
++	requestId: requestIdSchema,
++	reason: nonEmptyString,
++});
++
++export const editorProjectClearedMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_PROJECT_CLEARED"),
++	requestId: requestIdSchema,
++});
++
++export const editorReadyMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_READY"),
++});
++
++export const editorMediaSavedMessageSchema = z.strictObject({
++	...savedMediaPayloadSchema.shape,
++	type: z.literal("EDITOR_MEDIA_SAVED"),
++	url: safeSrc,
++});
++
++export const editorToParentMessageSchema = z.union([
++	editorPreviewItemAddedMessageSchema,
++	editorPreviewItemRejectedMessageSchema,
++	editorProjectClearedMessageSchema,
++	editorReadyMessageSchema,
++	editorMediaSavedMessageSchema,
++]);
++
++export type EditorPreviewItemAddedMessage = z.infer<typeof editorPreviewItemAddedMessageSchema>;
++export type EditorPreviewItemRejectedMessage = z.infer<
++	typeof editorPreviewItemRejectedMessageSchema
++>;
++export type EditorProjectClearedMessage = z.infer<typeof editorProjectClearedMessageSchema>;
++export type EditorReadyMessage = z.infer<typeof editorReadyMessageSchema>;
++export type EditorMediaSavedMessage = z.infer<typeof editorMediaSavedMessageSchema>;
++export type EditorToParentMessage = z.infer<typeof editorToParentMessageSchema>;
+diff --git a/packages/contract/src/internal/edit-video/index.ts b/packages/contract/src/internal/edit-video/index.ts
+new file mode 100644
+index 0000000..5ca5c52
+--- /dev/null
++++ b/packages/contract/src/internal/edit-video/index.ts
+@@ -0,0 +1,24 @@
++export type {
++	AudioSource,
++	CircleOverlay,
++	ImageOverlay,
++	Overlay,
++	RectangleOverlay,
++	RenderRequest,
++	ShapeOverlay,
++	TextOverlay,
++	VideoOverlay,
++	VideoSource,
++} from "./schemas.js";
++export {
++	audioSourceSchema,
++	circleOverlaySchema,
++	editVideoRequestSchema,
++	imageOverlaySchema,
++	overlaySchema,
++	rectangleOverlaySchema,
++	shapeOverlaySchema,
++	sourceSchema,
++	textOverlaySchema,
++	videoOverlaySchema,
++} from "./schemas.js";
+diff --git a/packages/contract/src/internal/edit-video/schemas.ts b/packages/contract/src/internal/edit-video/schemas.ts
+new file mode 100644
+index 0000000..81030ad
+--- /dev/null
++++ b/packages/contract/src/internal/edit-video/schemas.ts
+@@ -0,0 +1,183 @@
++import { z } from "zod";
++import { OverlayType } from "../shared/overlay-type.js";
++
++export const textOverlaySchema = z.object({
++	id: z.uuid(),
++	type: z.literal(OverlayType.text),
++	text: z.string(),
++	start: z.number().min(0),
++	end: z.number().positive(),
++	trackOrder: z.number().optional(),
++	x: z.number().min(0).max(100),
++	y: z.number().min(0).max(100),
++	fontSize: z.number().positive().optional(),
++	canvasHeight: z.number().min(1).optional(),
++	canvasWidth: z.number().min(1).optional(),
++	elementWidth: z.number().min(1).optional(),
++	elementHeight: z.number().min(1).optional(),
++	textAlign: z.union([z.literal("left"), z.literal("center"), z.literal("right")]).optional(),
++	fontColor: z.string().optional(),
++	backgroundColor: z.string().optional(),
++	strokeWidth: z.number().min(0).optional(),
++	strokeColor: z.string().optional(),
++	opacity: z.number().min(0).max(1).optional(),
++});
++
++export const imageOverlaySchema = z.object({
++	id: z.uuid(),
++	type: z.literal(OverlayType.image),
++	imageUrl: z.string().url(),
++	start: z.number().min(0),
++	end: z.number().positive(),
++	trackOrder: z.number().optional(),
++	x: z.number().min(0).max(100),
++	y: z.number().min(0).max(100),
++	width: z.number().min(1).max(10000).optional(),
++	height: z.number().min(1).max(10000).optional(),
++	opacity: z.number().min(0).max(1).optional(),
++});
++
++export const videoOverlaySchema = z.object({
++	id: z.uuid(),
++	type: z.literal(OverlayType.video),
++	sourceUrl: z.string().url(),
++	start: z.number().min(0),
++	end: z.number().positive(),
++	trackOrder: z.number(),
++	left: z.number(),
++	top: z.number(),
++	width: z.number().min(1).max(10000).optional(),
++	height: z.number().min(1).max(10000).optional(),
++	opacity: z.number().min(0).max(1).optional(),
++	transform: z.string().optional(),
++	trimFrom: z.number().min(0).optional(),
++	trimTo: z.number().positive().optional(),
++	crop: z
++		.object({
++			x: z.number().min(0),
++			y: z.number().min(0),
++			width: z.number().min(1),
++			height: z.number().min(1),
++		})
++		.optional(),
++	blur: z.number().min(0).optional(),
++	brightness: z.number().positive().optional(),
++	borderRadius: z.number().min(0).optional(),
++	rotation: z.number().optional(),
++});
++
++export const rectangleOverlaySchema = z.object({
++	id: z.uuid(),
++	type: z.literal(OverlayType.rectangle),
++	start: z.number().min(0),
++	end: z.number().positive(),
++	trackOrder: z.number().optional(),
++	x: z.number().min(0).max(100),
++	y: z.number().min(0).max(100),
++	width: z.number().min(1).max(10000).optional(),
++	height: z.number().min(1).max(10000).optional(),
++	color: z.string().optional(),
++	strokeWidth: z.number().min(1).max(20).optional(),
++	fill: z.boolean().optional(),
++	opacity: z.number().min(0).max(1).optional(),
++});
++
++export const circleOverlaySchema = z.object({
++	id: z.uuid(),
++	type: z.literal(OverlayType.circle),
++	start: z.number().min(0),
++	end: z.number().positive(),
++	trackOrder: z.number().optional(),
++	x: z.number().min(0).max(100),
++	y: z.number().min(0).max(100),
++	width: z.number().min(1).max(10000).optional(),
++	height: z.number().min(1).max(10000).optional(),
++	color: z.string().optional(),
++	strokeWidth: z.number().min(1).max(20).optional(),
++	fill: z.boolean().optional(),
++	opacity: z.number().min(0).max(1).optional(),
++});
++
++export const shapeOverlaySchema = z.object({
++	id: z.uuid(),
++	type: z.literal(OverlayType.shape),
++	svgData: z.string().min(1),
++	start: z.number().min(0),
++	end: z.number().positive(),
++	trackOrder: z.number().optional(),
++	x: z.number(),
++	y: z.number(),
++	width: z.number().min(1).max(10000).optional(),
++	height: z.number().min(1).max(10000).optional(),
++	opacity: z.number().min(0).max(1).optional(),
++	backgroundColor: z.string().optional(),
++	borderColor: z.string().optional(),
++	borderWidth: z.number().min(0).optional(),
++});
++
++export const overlaySchema = z.union([
++	textOverlaySchema,
++	imageOverlaySchema,
++	videoOverlaySchema,
++	rectangleOverlaySchema,
++	circleOverlaySchema,
++	shapeOverlaySchema,
++]);
++
++export const sourceSchema = z.object({
++	url: z.url(),
++	type: z.union([z.literal("video"), z.literal("image")]),
++	duration: z.number().min(0.1).default(5),
++	trimFrom: z.number().min(0).optional(),
++	trimTo: z.number().positive().optional(),
++});
++
++export const audioSourceSchema = z.object({
++	url: z.url(),
++	startTime: z.number().min(0),
++	duration: z.number().positive(),
++	originalDuration: z.number().positive().optional(),
++	audioTrimStart: z.number().min(0).optional(),
++	audioTrimEnd: z.number().positive().optional(),
++	sourceType: z.union([z.literal("audio"), z.literal("video")]).optional(),
++	volume: z.number().min(0).max(1),
++	muted: z.boolean().optional(),
++	solo: z.boolean().optional(),
++});
++
++const cutSchema = z.object({
++	start: z.number().min(0),
++	end: z.number().positive(),
++});
++
++export const editVideoRequestSchema = z.object({
++	sources: z.array(sourceSchema).min(1),
++	sourceUrl: z.url().optional(),
++	trimEnd: z.number().positive(),
++	cuts: z.array(cutSchema).default([]),
++	overlays: z.array(overlaySchema).default([]),
++	audioSources: z.array(audioSourceSchema).default([]),
++	audioMixMode: z.union([z.literal("mix"), z.literal("replace")]).default("mix"),
++	format: z.union([z.literal("mp4"), z.literal("webp"), z.literal("dash")]).default("mp4"),
++	frameTimeMs: z.number().optional(),
++	jobId: z.string(),
++	cropRegion: z
++		.object({
++			x: z.number().min(0),
++			y: z.number().min(0),
++			width: z.number().min(2),
++			height: z.number().min(2),
++		})
++		.optional(),
++});
++
++export type TextOverlay = z.infer<typeof textOverlaySchema>;
++export type ImageOverlay = z.infer<typeof imageOverlaySchema>;
++export type VideoOverlay = z.infer<typeof videoOverlaySchema>;
++export type RectangleOverlay = z.infer<typeof rectangleOverlaySchema>;
++export type CircleOverlay = z.infer<typeof circleOverlaySchema>;
++export type ShapeOverlay = z.infer<typeof shapeOverlaySchema>;
++export type Overlay = z.infer<typeof overlaySchema>;
++export type VideoSource = z.infer<typeof sourceSchema>;
++export type AudioSource = z.infer<typeof audioSourceSchema>;
++export type RenderRequest = z.infer<typeof editVideoRequestSchema>;
+diff --git a/packages/contract/src/internal/editor-export/index.ts b/packages/contract/src/internal/editor-export/index.ts
+new file mode 100644
+index 0000000..b8e4999
+--- /dev/null
++++ b/packages/contract/src/internal/editor-export/index.ts
+@@ -0,0 +1,9 @@
++export type {
++	ChannelRangeSource,
++	CutRange,
++	DirectSource,
++	EditorExportBody,
++	ExportEdits,
++	ExportOutput,
++	ExportSource,
++} from "./types.js";
+diff --git a/packages/contract/src/internal/editor-export/types.ts b/packages/contract/src/internal/editor-export/types.ts
+new file mode 100644
+index 0000000..eab68b2
+--- /dev/null
++++ b/packages/contract/src/internal/editor-export/types.ts
+@@ -0,0 +1,35 @@
++export interface CutRange {
++	start: number;
++	end: number;
++}
++
++export interface ExportEdits {
++	cuts?: CutRange[];
++}
++
++export interface ExportOutput {
++	format?: "mp4" | "dash";
++}
++
++export interface ChannelRangeSource {
++	type: "channel-range";
++	channelId: string;
++	startTimeMs: number;
++	endTimeMs: number;
++}
++
++export interface DirectSource {
++	type: "direct";
++	url: string;
++	duration: number;
++	trimFrom?: number;
++	trimTo?: number;
++}
++
++export type ExportSource = ChannelRangeSource | DirectSource;
++
++export interface EditorExportBody {
++	source: ExportSource;
++	edits?: ExportEdits;
++	output?: ExportOutput;
++}
+diff --git a/packages/contract/src/internal/render/design-payload.schema.ts b/packages/contract/src/internal/render/design-payload.schema.ts
+new file mode 100644
+index 0000000..c9f4085
+--- /dev/null
++++ b/packages/contract/src/internal/render/design-payload.schema.ts
+@@ -0,0 +1,174 @@
++import { z } from "zod";
++
++const parsePx = (v: unknown) => (typeof v === "string" ? Number.parseFloat(v) : v);
++const px = z.preprocess(parsePx, z.number().default(0));
++const pxOpt = z.preprocess(parsePx, z.number().optional());
++
++const displaySchema = z.object({ from: z.number(), to: z.number() });
++const trimSchema = z.object({ from: z.number(), to: z.number() });
++const sizeSchema = z.object({
++	width: z.number().positive(),
++	height: z.number().positive(),
++});
++
++const textDetailsSchema = z
++	.object({
++		text: z.string().optional(),
++		left: px,
++		top: px,
++		width: px,
++		height: px,
++		fontSize: pxOpt,
++		color: z.string().optional(),
++		backgroundColor: z.string().optional(),
++		opacity: z.coerce.number().min(0).max(100).optional(),
++		textAlign: z.enum(["left", "center", "right"]).optional(),
++		WebkitTextStrokeWidth: pxOpt,
++		WebkitTextStrokeColor: z.string().optional(),
++		borderWidth: pxOpt,
++		borderColor: z.string().optional(),
++		transform: z.string().optional(),
++		boxShadow: z.record(z.string(), z.unknown()).optional(),
++	})
++	.passthrough();
++
++const videoDetailsSchema = z
++	.object({
++		src: z.string().optional(),
++		left: px,
++		top: px,
++		width: px,
++		height: px,
++		volume: z.coerce.number().min(0).max(100).default(100),
++		opacity: z.coerce.number().min(0).max(100).optional(),
++		blur: pxOpt,
++		brightness: pxOpt,
++		borderRadius: pxOpt,
++		transform: z.string().optional(),
++		rotate: z.union([z.number(), z.string()]).optional(),
++		crop: z.object({ x: px, y: px, width: px, height: px }).optional(),
++	})
++	.passthrough();
++
++const imageDetailsSchema = z
++	.object({
++		src: z.string().optional(),
++		left: px,
++		top: px,
++		width: px,
++		height: px,
++		opacity: z.coerce.number().min(0).max(100).optional(),
++		transform: z.string().optional(),
++	})
++	.passthrough();
++
++const audioDetailsSchema = z
++	.object({
++		src: z.string().optional(),
++		volume: z.coerce.number().min(0).max(100).default(100),
++	})
++	.passthrough();
++
++const captionDetailsSchema = z
++	.object({
++		words: z.array(z.record(z.string(), z.unknown())).optional(),
++		left: px,
++		top: px,
++		width: px,
++		height: px,
++		fontSize: pxOpt,
++		color: z.string().optional(),
++		backgroundColor: z.string().optional(),
++		opacity: z.coerce.number().min(0).max(100).optional(),
++	})
++	.passthrough();
++
++const shapeDetailsSchema = z
++	.object({
++		src: z.string().optional(),
++		left: px,
++		top: px,
++		width: px,
++		height: px,
++		backgroundColor: z.string().optional(),
++		borderColor: z.string().optional(),
++		borderWidth: pxOpt,
++		opacity: z.coerce.number().min(0).max(100).optional(),
++	})
++	.passthrough();
++
++const trackItemBaseFields = {
++	id: z.string(),
++	display: displaySchema,
++	trim: trimSchema.optional(),
++	duration: z.number().optional(),
++	metadata: z.record(z.string(), z.unknown()).optional(),
++};
++
++const trackItemSchema = z.discriminatedUnion("type", [
++	z.object({
++		...trackItemBaseFields,
++		type: z.literal("text"),
++		details: textDetailsSchema.optional(),
++	}),
++	z.object({
++		...trackItemBaseFields,
++		type: z.literal("video"),
++		details: videoDetailsSchema.optional(),
++	}),
++	z.object({
++		...trackItemBaseFields,
++		type: z.literal("image"),
++		details: imageDetailsSchema.optional(),
++	}),
++	z.object({
++		...trackItemBaseFields,
++		type: z.literal("audio"),
++		details: audioDetailsSchema.optional(),
++	}),
++	z.object({
++		...trackItemBaseFields,
++		type: z.literal("caption"),
++		details: captionDetailsSchema.optional(),
++	}),
++	z.object({
++		...trackItemBaseFields,
++		type: z.literal("shape"),
++		details: shapeDetailsSchema.optional(),
++	}),
++]);
++
++const trackSchema = z.object({
++	id: z.string(),
++	type: z.string(),
++	items: z.array(z.string()),
++	muted: z.boolean().optional(),
++});
++
++const RENDERABLE_TYPES = new Set(["text", "video", "image", "audio", "caption", "shape"]);
++
++export const designPayloadSchema = z.object({
++	id: z.union([z.string(), z.number()]),
++	size: sizeSchema,
++	duration: z.number().optional(),
++	fps: z.number().positive(),
++	tracks: z.array(trackSchema),
++	trackItemIds: z.array(z.string()),
++	trackItemsMap: z.preprocess(
++		(val) => {
++			if (typeof val !== "object" || val === null) return val;
++			return Object.fromEntries(
++				Object.entries(val as Record<string, unknown>).filter(([, item]) => {
++					return (
++						typeof item === "object" &&
++						item !== null &&
++						RENDERABLE_TYPES.has((item as { type?: string }).type ?? "")
++					);
++				}),
++			);
++		},
++		z.record(z.string(), trackItemSchema),
++	),
++});
++
++export type DesignPayload = z.infer<typeof designPayloadSchema>;
+diff --git a/packages/contract/src/internal/render/index.ts b/packages/contract/src/internal/render/index.ts
+new file mode 100644
+index 0000000..2da15f5
+--- /dev/null
++++ b/packages/contract/src/internal/render/index.ts
+@@ -0,0 +1,2 @@
++export type { DesignPayload } from "./design-payload.schema.js";
++export { designPayloadSchema } from "./design-payload.schema.js";
+diff --git a/packages/contract/src/internal/shared/index.ts b/packages/contract/src/internal/shared/index.ts
+new file mode 100644
+index 0000000..687ebf0
+--- /dev/null
++++ b/packages/contract/src/internal/shared/index.ts
+@@ -0,0 +1,3 @@
++export { OverlayType } from "./overlay-type.js";
++export type { TimeRange } from "./time-range.js";
++export type { VideoMetadata } from "./video-metadata.js";
+diff --git a/packages/contract/src/internal/shared/overlay-type.ts b/packages/contract/src/internal/shared/overlay-type.ts
+new file mode 100644
+index 0000000..e6ed326
+--- /dev/null
++++ b/packages/contract/src/internal/shared/overlay-type.ts
+@@ -0,0 +1,8 @@
++export const OverlayType = {
++	text: "text",
++	image: "image",
++	video: "video",
++	rectangle: "rectangle",
++	circle: "circle",
++	shape: "shape",
++} as const;
+diff --git a/packages/contract/src/internal/shared/time-range.ts b/packages/contract/src/internal/shared/time-range.ts
+new file mode 100644
+index 0000000..c3b6bda
+--- /dev/null
++++ b/packages/contract/src/internal/shared/time-range.ts
+@@ -0,0 +1,4 @@
++export interface TimeRange {
++	start: number;
++	end: number;
++}
+diff --git a/packages/contract/src/internal/shared/video-metadata.ts b/packages/contract/src/internal/shared/video-metadata.ts
+new file mode 100644
+index 0000000..d57ca02
+--- /dev/null
++++ b/packages/contract/src/internal/shared/video-metadata.ts
+@@ -0,0 +1,5 @@
++export interface VideoMetadata {
++	duration: number;
++	width: number;
++	height: number;
++}
+diff --git a/packages/contract/src/internal/upload/index.ts b/packages/contract/src/internal/upload/index.ts
+new file mode 100644
+index 0000000..08d381b
+--- /dev/null
++++ b/packages/contract/src/internal/upload/index.ts
+@@ -0,0 +1,14 @@
++export type {
++	CleanupRequest,
++	CleanupResponse,
++	GetSignedUrlRequest,
++	GetSignedUrlResponse,
++} from "./schemas.js";
++export {
++	cleanupBodySchema,
++	cleanupRequestSchema,
++	cleanupResponseSchema,
++	getSignedUrlBodySchema,
++	getSignedUrlRequestSchema,
++	getSignedUrlResponseSchema,
++} from "./schemas.js";
+diff --git a/packages/contract/src/internal/upload/schemas.ts b/packages/contract/src/internal/upload/schemas.ts
+new file mode 100644
+index 0000000..428a66b
+--- /dev/null
++++ b/packages/contract/src/internal/upload/schemas.ts
+@@ -0,0 +1,50 @@
++import { z } from "zod";
++
++const errorResponseSchema = z.object({
++	error: z.string(),
++});
++
++export const getSignedUrlBodySchema = z.object({
++	filename: z.string().min(1),
++	mimetype: z.string().min(1),
++});
++
++export const getSignedUrlResponseSchema = z.object({
++	uploadUrl: z.string(),
++	s3Key: z.string(),
++	filename: z.string(),
++	publicUrl: z.string(),
++});
++
++export const getSignedUrlRequestSchema = {
++	body: getSignedUrlBodySchema,
++	response: {
++		200: getSignedUrlResponseSchema,
++		400: errorResponseSchema,
++		500: errorResponseSchema,
++	},
++};
++
++export const cleanupBodySchema = z.object({
++	s3Keys: z.array(z.string().min(1)).min(1),
++});
++
++export const cleanupResponseSchema = z.object({
++	deleted: z.number(),
++	deletedFiles: z.array(z.string()),
++	errors: z.array(z.string()).optional(),
++});
++
++export const cleanupRequestSchema = {
++	body: cleanupBodySchema,
++	response: {
++		200: cleanupResponseSchema,
++		400: errorResponseSchema,
++		500: errorResponseSchema,
++	},
++};
++
++export type GetSignedUrlRequest = z.infer<typeof getSignedUrlBodySchema>;
++export type GetSignedUrlResponse = z.infer<typeof getSignedUrlResponseSchema>;
++export type CleanupRequest = z.infer<typeof cleanupBodySchema>;
++export type CleanupResponse = z.infer<typeof cleanupResponseSchema>;
+diff --git a/packages/contract/src/shared/__tests__/saved-media.test.ts b/packages/contract/src/shared/__tests__/saved-media.test.ts
+new file mode 100644
+index 0000000..bfe2c18
+--- /dev/null
++++ b/packages/contract/src/shared/__tests__/saved-media.test.ts
+@@ -0,0 +1,63 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++import { savedMediaItemSchema, savedMediaPayloadSchema } from "../saved-media.js";
++
++describe("savedMediaItemSchema", () => {
++	it("accepts image item", () => {
++		assert.equal(savedMediaItemSchema.safeParse({ type: "image", id: "img-1" }).success, true);
++	});
++
++	it("accepts clip item", () => {
++		assert.equal(savedMediaItemSchema.safeParse({ type: "clip", id: "clip-1" }).success, true);
++	});
++
++	it("accepts recording with from/to", () => {
++		assert.equal(
++			savedMediaItemSchema.safeParse({ type: "recording", id: "ch-1", from: 0, to: 100 }).success,
++			true,
++		);
++	});
++
++	it("accepts audio with from/to", () => {
++		assert.equal(
++			savedMediaItemSchema.safeParse({ type: "audio", id: "aud-1", from: 0, to: 100 }).success,
++			true,
++		);
++	});
++
++	it("rejects recording missing from/to", () => {
++		assert.equal(savedMediaItemSchema.safeParse({ type: "recording", id: "ch-1" }).success, false);
++	});
++
++	it("rejects unknown type", () => {
++		assert.equal(savedMediaItemSchema.safeParse({ type: "foo", id: "x" }).success, false);
++	});
++});
++
++describe("savedMediaPayloadSchema", () => {
++	const valid = {
++		mediaId: "550e8400-e29b-41d4-a716-446655440000",
++		mediaName: "Clip A",
++		downloadToComputer: true,
++		saveToPersonalChannel: false,
++		selectedUnitChannelIds: [],
++		exportType: "mp4",
++		items: [{ type: "image", id: "img-1" }],
++	};
++
++	it("accepts a valid payload", () => {
++		assert.equal(savedMediaPayloadSchema.safeParse(valid).success, true);
++	});
++
++	it("rejects missing mediaName", () => {
++		const { mediaName: _m, ...rest } = valid;
++		assert.equal(savedMediaPayloadSchema.safeParse(rest).success, false);
++	});
++
++	it("rejects unknown exportType", () => {
++		assert.equal(
++			savedMediaPayloadSchema.safeParse({ ...valid, exportType: "json" }).success,
++			false,
++		);
++	});
++});
+diff --git a/CONTEXT.md b/CONTEXT.md
+index 0b3789a..64d5313 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -8,6 +8,20 @@ Zod is the single validation library for both env config and HTTP request schema
+ 
+ → See [ADR 0001](docs/adr/0001-zod-over-typebox.md)
+ 
++## Contract Package Buckets
++
++`@video-editor/contract` exposes four explicit subpaths so external teams can see what's theirs vs the editor team's:
++
++**from-parent** — parent app → editor postMessage (`EDITOR_ADD_PREVIEW_ITEM`, `EDITOR_CLEAR_PROJECT`). Subpath: `@video-editor/contract/iframe/from-parent`.
++
++**to-parent** — editor → parent postMessage (`EDITOR_PREVIEW_ITEM_ADDED`, `EDITOR_PREVIEW_ITEM_REJECTED`, `EDITOR_PROJECT_CLEARED`, `EDITOR_READY`, `EDITOR_MEDIA_SAVED`). Subpath: `@video-editor/contract/iframe/to-parent`.
++
++**events** — server publishes to the `video-editor` topic exchange (`export.started`, `export.completed`, `export.failed`). Subpath: `@video-editor/contract/events`.
++
++**internal** — editor server's own HTTP API schemas (upload, edit-video, render, editor-export). Subpath: `@video-editor/contract/internal/<feature>`. External teams must not import — see [ADR 0004](docs/adr/0004-server-http-schemas-in-shared-contract-package.md).
++
++Every TS type in the package is `z.infer<typeof schema>` so schemas and types cannot drift.
++
+ ## Messaging
+ 
+ **Publish** — server hands an event envelope to the broker on the `video-editor` topic exchange. Considered successful only when the broker confirms it (publisher confirms). A publish that the broker never acks, or that the broker returns as unrouted, is a failure the server must log and meter.
+diff --git a/apps/frontend/CLAUDE.md b/apps/frontend/CLAUDE.md
+index 3f03382..229a04f 100644
+--- a/apps/frontend/CLAUDE.md
++++ b/apps/frontend/CLAUDE.md
+@@ -62,7 +62,7 @@ Global scene store: `src/store/use-scene-store.ts`
+ 
+ ## iframe Embedding
+ 
+-`useEditorPostMessage` hook (in `editor.tsx`) listens for `window.postMessage` from parent. Uses `@video-editor/iframe-contract` for typed schemas.
++`useEditorPostMessage` hook (in `editor.tsx`) listens for `window.postMessage` from parent. Uses `@video-editor/contract/iframe/from-parent` (parse incoming) and `@video-editor/contract/iframe/to-parent` (build responses) for typed schemas.
+ 
+ Supported inbound messages:
+ - `EDITOR_ADD_PREVIEW_ITEM` — adds video/audio track at end of timeline (`recording-range`, `media`, `audio-range` payloads)
+@@ -72,6 +72,8 @@ Outbound: `EDITOR_READY` on init, responses to each message.
+ 
+ Allowed origins: `VITE_EDITOR_PARENT_ORIGINS` env var (comma-separated; defaults to `window.location.origin`).
+ 
++Auth: no token is passed via postMessage. The editor and its server share an origin (prod gateway; dev vite proxy), so the browser auto-attaches the HttpOnly `ztube-token` cookie on `fetch('/editor/preview-source', …)`. The server reads it from the `Cookie` header and forwards it upstream to Core.
++
+ ## Styling
+ 
+ - Tailwind v4 + shadcn/ui (new-york style)
+@@ -94,7 +96,7 @@ React Query via `src/components/query-provider.tsx`. Server state for API calls.
+ - `@tanstack/react-query` v5 — server state
+ - `react-router-dom` v7 — routing
+ - `@radix-ui/*` — headless UI primitives
+-- `@video-editor/iframe-contract` — postMessage types (workspace)
++- `@video-editor/contract` — postMessage + event schemas (workspace; use `/iframe/from-parent`, `/iframe/to-parent`, `/shared` subpaths)
+ 
+ ## Environment
+ 
+diff --git a/apps/frontend/src/features/editor/external-preview/payload-intake.ts b/apps/frontend/src/features/editor/external-preview/payload-intake.ts
+index 2e398e7..1ed7e88 100644
+--- a/apps/frontend/src/features/editor/external-preview/payload-intake.ts
++++ b/apps/frontend/src/features/editor/external-preview/payload-intake.ts
+@@ -3,7 +3,7 @@ import type StateManager from "@designcombo/state";
+ import { ADD_AUDIO, ADD_VIDEO } from "@designcombo/state";
+ import { generateId } from "@designcombo/timeline";
+ import type { ITrackItem } from "@designcombo/types";
+-import type { PreviewItemPayload } from "@video-editor/contract";
++import type { PreviewItemPayload } from "@video-editor/contract/iframe/from-parent";
+ import { resolvePreviewSource } from "./preview-source-api";
+ 
+ export type ExternalMetadata = {
+@@ -195,7 +195,6 @@ const appendItemState = (
+ export const addPreviewItemToEditor = async (
+ 	stateManager: StateManager,
+ 	payload: PreviewItemPayload,
+-	authToken?: string,
+ ) => {
+ 	const itemId = generateId();
+ 	const insertAtMs = getProjectDuration(stateManager);
+@@ -216,7 +215,6 @@ export const addPreviewItemToEditor = async (
+ 				payload.channelId,
+ 				payload.startTimeMs,
+ 				payload.endTimeMs,
+-				authToken,
+ 			);
+ 			hlsSrc = resolved.playlistUrl;
+ 			videoWidth = resolved.width;
+diff --git a/apps/frontend/src/features/editor/external-preview/preview-source-api.ts b/apps/frontend/src/features/editor/external-preview/preview-source-api.ts
+index e193a61..1f735a5 100644
+--- a/apps/frontend/src/features/editor/external-preview/preview-source-api.ts
++++ b/apps/frontend/src/features/editor/external-preview/preview-source-api.ts
+@@ -21,13 +21,10 @@ export const resolvePreviewSource = async (
+ 	channelId: string,
+ 	startTimeMs: number,
+ 	endTimeMs: number,
+-	authToken?: string,
+ ): Promise<PreviewSourceResponse> => {
+-	const headers: Record<string, string> = { "Content-Type": "application/json" };
+-	if (authToken) headers["x-ztube-token"] = authToken;
+ 	const response = await fetch("/editor/preview-source", {
+ 		method: "POST",
+-		headers,
++		headers: { "Content-Type": "application/json" },
+ 		body: JSON.stringify({
+ 			source: { type: "channel-range", channelId, startTimeMs, endTimeMs },
+ 		}),
+diff --git a/apps/frontend/src/features/editor/external-preview/use-editor-post-message.ts b/apps/frontend/src/features/editor/external-preview/use-editor-post-message.ts
+index e7306e2..17869c3 100644
+--- a/apps/frontend/src/features/editor/external-preview/use-editor-post-message.ts
++++ b/apps/frontend/src/features/editor/external-preview/use-editor-post-message.ts
+@@ -1,4 +1,8 @@
+ import type StateManager from "@designcombo/state";
++import {
++	type ParentToEditorMessage,
++	parentToEditorMessageSchema,
++} from "@video-editor/contract/iframe/from-parent";
+ import {
+ 	createPreviewItemAddedMessage,
+ 	createPreviewItemRejectedMessage,
+@@ -8,9 +12,7 @@ import {
+ 	type EditorProjectClearedMessage,
+ 	type EditorReadyMessage,
+ 	type EditorToParentMessage,
+-	type ParentToEditorMessage,
+-	parentToEditorMessageSchema,
+-} from "@video-editor/contract";
++} from "@video-editor/contract/iframe/to-parent";
+ import { useEffect, useMemo, useRef } from "react";
+ import { addPreviewItemToEditor, clearProject } from "./payload-intake";
+ import { parseAllowedOrigins } from "./utils";
+@@ -21,7 +23,6 @@ type ResponseCacheEntry =
+ 	| EditorProjectClearedMessage;
+ 
+ export const useEditorPostMessage = (stateManager: StateManager) => {
+-	const authTokenRef = useRef<string>("");
+ 	const responseCacheRef = useRef<Map<string, ResponseCacheEntry>>(new Map());
+ 	const MAX_RESPONSE_CACHE_SIZE = 100;
+ 	const allowedOrigins = useMemo(() => {
+@@ -93,11 +94,6 @@ export const useEditorPostMessage = (stateManager: StateManager) => {
+ 
+ 			const message: ParentToEditorMessage = parsed.data;
+ 
+-			if (message.type === "EDITOR_SET_AUTH") {
+-				authTokenRef.current = message.token;
+-				return;
+-			}
+-
+ 			if (message.requestId) {
+ 				const cachedResponse = responseCacheRef.current.get(message.requestId);
+ 				if (cachedResponse) {
+@@ -128,11 +124,7 @@ export const useEditorPostMessage = (stateManager: StateManager) => {
+ 			}
+ 
+ 			try {
+-				const itemId = await addPreviewItemToEditor(
+-					stateManager,
+-					message.payload,
+-					authTokenRef.current,
+-				);
++				const itemId = await addPreviewItemToEditor(stateManager, message.payload);
+ 				const response: EditorPreviewItemAddedMessage = createPreviewItemAddedMessage(
+ 					itemId,
+ 					message.requestId,
+diff --git a/apps/frontend/src/features/editor/utils/__tests__/extract-saved-items.test.ts b/apps/frontend/src/features/editor/utils/__tests__/extract-saved-items.test.ts
+index 5cb2b8d..c99a0a9 100644
+--- a/apps/frontend/src/features/editor/utils/__tests__/extract-saved-items.test.ts
++++ b/apps/frontend/src/features/editor/utils/__tests__/extract-saved-items.test.ts
+@@ -1,5 +1,5 @@
+ import type { ITrackItem } from "@designcombo/types";
+-import { savedMediaItemSchema } from "@video-editor/contract";
++import { savedMediaItemSchema } from "@video-editor/contract/iframe/to-parent";
+ import { describe, expect, it } from "vitest";
+ import { extractSavedItems } from "../extract-saved-items";
+ 
+diff --git a/apps/frontend/src/features/editor/utils/extract-saved-items.ts b/apps/frontend/src/features/editor/utils/extract-saved-items.ts
+index 68535fd..9415d01 100644
+--- a/apps/frontend/src/features/editor/utils/extract-saved-items.ts
++++ b/apps/frontend/src/features/editor/utils/extract-saved-items.ts
+@@ -1,5 +1,5 @@
+ import type { ITrackItem } from "@designcombo/types";
+-import type { SavedMediaItem } from "@video-editor/contract";
++import type { SavedMediaItem } from "@video-editor/contract/iframe/to-parent";
+ import type { ExternalMetadata } from "../external-preview/payload-intake";
+ 
+ export function extractSavedItems(trackItemsMap: Record<string, ITrackItem>): SavedMediaItem[] {
+diff --git a/apps/iframe-demo/CLAUDE.md b/apps/iframe-demo/CLAUDE.md
+index a299d58..68b8df4 100644
+--- a/apps/iframe-demo/CLAUDE.md
++++ b/apps/iframe-demo/CLAUDE.md
+@@ -30,7 +30,7 @@ pnpm type-check   # tsc -p tsconfig.json --noEmit
+ | `src/app/pages/editor-page/editor-page.component.ts` | Main page — hosts iframe, drag/resize, postMessage send/receive |
+ | `src/app/pages/media-page/media-page.component.ts` | Secondary media page |
+ | `src/app/services/editor-bridge.service.ts` | Angular signal-based queue — injects items cross-page |
+-| `src/app/message-types.ts` | Local type mirror of `@video-editor/iframe-contract` |
++| `src/app/message-types.ts` | Local type mirror of `@video-editor/contract/iframe/*` |
+ | `src/environments/environment.ts` | `editorUrl: http://localhost:3000/editor/embed` |
+ 
+ ## postMessage Integration
+@@ -41,6 +41,8 @@ Editor iframe is loaded at `editorUrl` from `environment.ts`. The demo app:
+ 2. Sends `EDITOR_CLEAR_PROJECT` to reset the editor
+ 3. Displays outgoing payload and last response
+ 
++Auth (`ztube-token`) is **not** forwarded via postMessage. The cookie is HttpOnly and travels server-side: the iframe's fetch to its same-origin server attaches it automatically.
++
+ `editor-bridge.service.ts` uses Angular signals to queue items across page navigation.
+ 
+ ## Dependencies
+diff --git a/apps/iframe-demo/src/app/message-types.ts b/apps/iframe-demo/src/app/message-types.ts
+index c699f62..e70cb95 100644
+--- a/apps/iframe-demo/src/app/message-types.ts
++++ b/apps/iframe-demo/src/app/message-types.ts
+@@ -1,7 +1,6 @@
+ export const EDITOR_ADD_PREVIEW_ITEM = "EDITOR_ADD_PREVIEW_ITEM";
+ export const EDITOR_CLEAR_PROJECT = "EDITOR_CLEAR_PROJECT";
+ export const EDITOR_READY = "EDITOR_READY";
+-export const EDITOR_SET_AUTH = "EDITOR_SET_AUTH";
+ 
+ export type RecordingRangePayload = {
+ 	kind: "recording-range";
+diff --git a/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.ts b/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.ts
+index f4b8bed..f58b8d9 100644
+--- a/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.ts
++++ b/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.ts
+@@ -22,7 +22,6 @@ import {
+ 	EDITOR_ADD_PREVIEW_ITEM,
+ 	EDITOR_CLEAR_PROJECT,
+ 	EDITOR_READY,
+-	EDITOR_SET_AUTH,
+ 	type EditorResponse,
+ 	type PreviewItemPayload,
+ 	type RecordingRangePayload,
+@@ -248,11 +247,6 @@ export class EditorPageComponent implements OnInit, OnDestroy {
+ 		this.postToEditor(msg);
+ 	}
+ 
+-	private getZtubeToken(): string {
+-		const match = document.cookie.match(/(?:^|;\s*)ztube-token=([^;]+)/);
+-		return match ? decodeURIComponent(match[1]) : "";
+-	}
+-
+ 	private postToEditor(payload: object): void {
+ 		this.iframeRef().nativeElement.contentWindow?.postMessage(payload, this.editorOrigin);
+ 	}
+@@ -269,8 +263,6 @@ export class EditorPageComponent implements OnInit, OnDestroy {
+ 
+ 		if (data.type === EDITOR_READY) {
+ 			this.editorReady.set(true);
+-			const token = this.getZtubeToken();
+-			if (token) this.postToEditor({ type: EDITOR_SET_AUTH, token });
+ 			const pending = this.bridge.drainQueue();
+ 			for (const item of pending) this.postItem(item);
+ 			return;
+diff --git a/apps/server/CLAUDE.md b/apps/server/CLAUDE.md
+index d7167b1..f62a91d 100644
+--- a/apps/server/CLAUDE.md
++++ b/apps/server/CLAUDE.md
+@@ -106,10 +106,11 @@ Controller: `src/features/editor-export/adapters/inbound/http/editor-export.cont
+ 
+ ## Shared Domain (`src/shared/`)
+ 
+-- `domain/OverlayType.ts`, `TimeRange.ts`, `VideoMetadata.ts`, `RenderResponse.ts`
+ - `application/ports/outbound/StoragePort.ts` — storage interface
+ - `utils/` — file, font, time utilities
+ 
++HTTP route schemas + their value types (`OverlayType`, `TimeRange`, `VideoMetadata`, `DesignPayload`, `RenderRequest`, upload schemas, editor-export body types) live in `@video-editor/contract/internal/<feature>`. See [ADR 0004](../../docs/adr/0004-server-http-schemas-in-shared-contract-package.md).
++
+ ## Environment Variables
+ 
+ All validated by Zod in `src/config/env.ts`. Key vars:
+diff --git a/apps/server/src/features/edit-video/adapters/inbound/http/edit-video.controller.ts b/apps/server/src/features/edit-video/adapters/inbound/http/edit-video.controller.ts
+index a20f4ec..0b5fda1 100644
+--- a/apps/server/src/features/edit-video/adapters/inbound/http/edit-video.controller.ts
++++ b/apps/server/src/features/edit-video/adapters/inbound/http/edit-video.controller.ts
+@@ -1,3 +1,7 @@
++import {
++	editVideoRequestSchema,
++	type RenderRequest,
++} from "@video-editor/contract/internal/edit-video";
+ import { Logger } from "@ztube/observability";
+ import type { FastifyInstance, FastifyPluginAsync } from "fastify";
+ import { getOutputFilename } from "../../../../../shared/utils/file.utils.ts";
+@@ -5,8 +9,6 @@ import { HttpStatus } from "../../../../../shared/utils/http-status.ts";
+ import { DirectRenderInputAdapter } from "../../../../render/adapters/inbound/direct/DirectRenderInputAdapter.ts";
+ import type { VideoRenderUseCase } from "../../../../render/application/use-cases/VideoRenderUseCase.ts";
+ import type { EditVideoJobStatePort } from "../../../application/ports/outbound/EditVideoJobStatePort.ts";
+-import { editVideoRequestSchema } from "./edit-video.schema.ts";
+-import type { RenderRequest } from "./edit-video.types.ts";
+ 
+ interface EditVideoControllerOptions {
+ 	videoRenderUseCase: VideoRenderUseCase;
+diff --git a/apps/server/src/features/edit-video/adapters/inbound/http/edit-video.schema.ts b/apps/server/src/features/edit-video/adapters/inbound/http/edit-video.schema.ts
+deleted file mode 100644
+index f3be0e1..0000000
+--- a/apps/server/src/features/edit-video/adapters/inbound/http/edit-video.schema.ts
++++ /dev/null
+@@ -1,172 +0,0 @@
+-import { z } from "zod";
+-import { OverlayType } from "../../../../../shared/domain/OverlayType.ts";
+-
+-export const textOverlaySchema = z.object({
+-	id: z.uuid(),
+-	type: z.literal(OverlayType.text),
+-	text: z.string(),
+-	start: z.number().min(0),
+-	end: z.number().positive(),
+-	trackOrder: z.number().optional(),
+-	x: z.number().min(0).max(100),
+-	y: z.number().min(0).max(100),
+-	fontSize: z.number().positive().optional(),
+-	canvasHeight: z.number().min(1).optional(),
+-	canvasWidth: z.number().min(1).optional(),
+-	elementWidth: z.number().min(1).optional(),
+-	elementHeight: z.number().min(1).optional(),
+-	textAlign: z.union([z.literal("left"), z.literal("center"), z.literal("right")]).optional(),
+-	fontColor: z.string().optional(),
+-	backgroundColor: z.string().optional(),
+-	strokeWidth: z.number().min(0).optional(),
+-	strokeColor: z.string().optional(),
+-	opacity: z.number().min(0).max(1).optional(),
+-});
+-
+-export const imageOverlaySchema = z.object({
+-	id: z.uuid(),
+-	type: z.literal(OverlayType.image),
+-	imageUrl: z.string().url(),
+-	start: z.number().min(0),
+-	end: z.number().positive(),
+-	trackOrder: z.number().optional(),
+-	x: z.number().min(0).max(100),
+-	y: z.number().min(0).max(100),
+-	width: z.number().min(1).max(10000).optional(),
+-	height: z.number().min(1).max(10000).optional(),
+-	opacity: z.number().min(0).max(1).optional(),
+-});
+-
+-export const videoOverlaySchema = z.object({
+-	id: z.uuid(),
+-	type: z.literal(OverlayType.video),
+-	sourceUrl: z.string().url(),
+-	start: z.number().min(0),
+-	end: z.number().positive(),
+-	trackOrder: z.number(),
+-	left: z.number(),
+-	top: z.number(),
+-	width: z.number().min(1).max(10000).optional(),
+-	height: z.number().min(1).max(10000).optional(),
+-	opacity: z.number().min(0).max(1).optional(),
+-	transform: z.string().optional(),
+-	trimFrom: z.number().min(0).optional(),
+-	trimTo: z.number().positive().optional(),
+-	crop: z
+-		.object({
+-			x: z.number().min(0),
+-			y: z.number().min(0),
+-			width: z.number().min(1),
+-			height: z.number().min(1),
+-		})
+-		.optional(),
+-	blur: z.number().min(0).optional(),
+-	brightness: z.number().positive().optional(),
+-	borderRadius: z.number().min(0).optional(),
+-	rotation: z.number().optional(),
+-});
+-
+-export const rectangleOverlaySchema = z.object({
+-	id: z.uuid(),
+-	type: z.literal(OverlayType.rectangle),
+-	start: z.number().min(0),
+-	end: z.number().positive(),
+-	trackOrder: z.number().optional(),
+-	x: z.number().min(0).max(100),
+-	y: z.number().min(0).max(100),
+-	width: z.number().min(1).max(10000).optional(),
+-	height: z.number().min(1).max(10000).optional(),
+-	color: z.string().optional(),
+-	strokeWidth: z.number().min(1).max(20).optional(),
+-	fill: z.boolean().optional(),
+-	opacity: z.number().min(0).max(1).optional(),
+-});
+-
+-export const circleOverlaySchema = z.object({
+-	id: z.uuid(),
+-	type: z.literal(OverlayType.circle),
+-	start: z.number().min(0),
+-	end: z.number().positive(),
+-	trackOrder: z.number().optional(),
+-	x: z.number().min(0).max(100),
+-	y: z.number().min(0).max(100),
+-	width: z.number().min(1).max(10000).optional(),
+-	height: z.number().min(1).max(10000).optional(),
+-	color: z.string().optional(),
+-	strokeWidth: z.number().min(1).max(20).optional(),
+-	fill: z.boolean().optional(),
+-	opacity: z.number().min(0).max(1).optional(),
+-});
+-
+-export const shapeOverlaySchema = z.object({
+-	id: z.uuid(),
+-	type: z.literal(OverlayType.shape),
+-	svgData: z.string().min(1),
+-	start: z.number().min(0),
+-	end: z.number().positive(),
+-	trackOrder: z.number().optional(),
+-	x: z.number(),
+-	y: z.number(),
+-	width: z.number().min(1).max(10000).optional(),
+-	height: z.number().min(1).max(10000).optional(),
+-	opacity: z.number().min(0).max(1).optional(),
+-	backgroundColor: z.string().optional(),
+-	borderColor: z.string().optional(),
+-	borderWidth: z.number().min(0).optional(),
+-});
+-
+-export const overlaySchema = z.union([
+-	textOverlaySchema,
+-	imageOverlaySchema,
+-	videoOverlaySchema,
+-	rectangleOverlaySchema,
+-	circleOverlaySchema,
+-	shapeOverlaySchema,
+-]);
+-
+-export const sourceSchema = z.object({
+-	url: z.url(),
+-	type: z.union([z.literal("video"), z.literal("image")]),
+-	duration: z.number().min(0.1).default(5),
+-	trimFrom: z.number().min(0).optional(),
+-	trimTo: z.number().positive().optional(),
+-});
+-
+-export const audioSourceSchema = z.object({
+-	url: z.url(),
+-	startTime: z.number().min(0),
+-	duration: z.number().positive(),
+-	originalDuration: z.number().positive().optional(),
+-	audioTrimStart: z.number().min(0).optional(),
+-	audioTrimEnd: z.number().positive().optional(),
+-	sourceType: z.union([z.literal("audio"), z.literal("video")]).optional(),
+-	volume: z.number().min(0).max(1),
+-	muted: z.boolean().optional(),
+-	solo: z.boolean().optional(),
+-});
+-
+-const cutSchema = z.object({
+-	start: z.number().min(0),
+-	end: z.number().positive(),
+-});
+-
+-export const editVideoRequestSchema = z.object({
+-	sources: z.array(sourceSchema).min(1),
+-	sourceUrl: z.url().optional(),
+-	trimEnd: z.number().positive(),
+-	cuts: z.array(cutSchema).default([]),
+-	overlays: z.array(overlaySchema).default([]),
+-	audioSources: z.array(audioSourceSchema).default([]),
+-	audioMixMode: z.union([z.literal("mix"), z.literal("replace")]).default("mix"),
+-	format: z.union([z.literal("mp4"), z.literal("webp"), z.literal("dash")]).default("mp4"),
+-	frameTimeMs: z.number().optional(),
+-	jobId: z.string(),
+-	cropRegion: z
+-		.object({
+-			x: z.number().min(0),
+-			y: z.number().min(0),
+-			width: z.number().min(2),
+-			height: z.number().min(2),
+-		})
+-		.optional(),
+-});
+diff --git a/apps/server/src/features/edit-video/adapters/inbound/http/edit-video.types.ts b/apps/server/src/features/edit-video/adapters/inbound/http/edit-video.types.ts
+deleted file mode 100644
+index 64b4c9b..0000000
+--- a/apps/server/src/features/edit-video/adapters/inbound/http/edit-video.types.ts
++++ /dev/null
+@@ -1,24 +0,0 @@
+-import type { z } from "zod";
+-import type {
+-	audioSourceSchema,
+-	circleOverlaySchema,
+-	editVideoRequestSchema,
+-	imageOverlaySchema,
+-	overlaySchema,
+-	rectangleOverlaySchema,
+-	shapeOverlaySchema,
+-	sourceSchema,
+-	textOverlaySchema,
+-	videoOverlaySchema,
+-} from "./edit-video.schema.ts";
+-
+-export type TextOverlay = z.infer<typeof textOverlaySchema>;
+-export type ImageOverlay = z.infer<typeof imageOverlaySchema>;
+-export type VideoOverlay = z.infer<typeof videoOverlaySchema>;
+-export type RectangleOverlay = z.infer<typeof rectangleOverlaySchema>;
+-export type CircleOverlay = z.infer<typeof circleOverlaySchema>;
+-export type ShapeOverlay = z.infer<typeof shapeOverlaySchema>;
+-export type Overlay = z.infer<typeof overlaySchema>;
+-export type VideoSource = z.infer<typeof sourceSchema>;
+-export type AudioSource = z.infer<typeof audioSourceSchema>;
+-export type RenderRequest = z.infer<typeof editVideoRequestSchema>;
+diff --git a/apps/server/src/features/edit-video/application/ports/outbound/EditVideoJobStatePort.ts b/apps/server/src/features/edit-video/application/ports/outbound/EditVideoJobStatePort.ts
+index 8cb96a0..a5dfbc4 100644
+--- a/apps/server/src/features/edit-video/application/ports/outbound/EditVideoJobStatePort.ts
++++ b/apps/server/src/features/edit-video/application/ports/outbound/EditVideoJobStatePort.ts
+@@ -1,4 +1,4 @@
+-import type { TimeRange } from "../../../../../shared/domain/TimeRange.ts";
++import type { TimeRange } from "@video-editor/contract/internal/shared";
+ 
+ export interface EditVideoJobState {
+ 	status: "PROCESSING" | "COMPLETED" | "FAILED";
+diff --git a/apps/server/src/features/edit-video/domain/video-segment.policy.ts b/apps/server/src/features/edit-video/domain/video-segment.policy.ts
+index 20ad72b..84f1916 100644
+--- a/apps/server/src/features/edit-video/domain/video-segment.policy.ts
++++ b/apps/server/src/features/edit-video/domain/video-segment.policy.ts
+@@ -1,5 +1,5 @@
++import type { TimeRange } from "@video-editor/contract/internal/shared";
+ import { probeMpdMetadata } from "../../../infrastructure/ffmpeg/ffmpeg.utils.ts";
+-import type { TimeRange } from "../../../shared/domain/TimeRange.ts";
+ import { ONE_HOUR_IN_SECONDS } from "../../../shared/utils/time.utils.ts";
+ 
+ const MAX_MPD_VIDEO_WIDTH = 1920;
+diff --git a/apps/server/src/features/editor-export/adapters/inbound/http/editor-export.controller.ts b/apps/server/src/features/editor-export/adapters/inbound/http/editor-export.controller.ts
+index 502a20f..1134a6c 100644
+--- a/apps/server/src/features/editor-export/adapters/inbound/http/editor-export.controller.ts
++++ b/apps/server/src/features/editor-export/adapters/inbound/http/editor-export.controller.ts
+@@ -1,47 +1,16 @@
++import type { VideoSource } from "@video-editor/contract/internal/edit-video";
++import type {
++	CutRange,
++	DirectSource,
++	EditorExportBody,
++} from "@video-editor/contract/internal/editor-export";
+ import type { FastifyPluginAsync } from "fastify";
+-import type { VideoSource } from "../../../../../shared/domain/render-types.ts";
+ import { HttpStatus } from "../../../../../shared/utils/http-status.ts";
+ import type {
+ 	VideoRenderInput,
+ 	VideoRenderUseCase,
+ } from "../../../../render/application/use-cases/VideoRenderUseCase.ts";
+ 
+-interface CutRange {
+-	start: number;
+-	end: number;
+-}
+-
+-interface ExportEdits {
+-	cuts?: CutRange[];
+-}
+-
+-interface ExportOutput {
+-	format?: "mp4" | "dash";
+-}
+-
+-interface ChannelRangeSource {
+-	type: "channel-range";
+-	channelId: string;
+-	startTimeMs: number;
+-	endTimeMs: number;
+-}
+-
+-interface DirectSource {
+-	type: "direct";
+-	url: string;
+-	duration: number;
+-	trimFrom?: number;
+-	trimTo?: number;
+-}
+-
+-type ExportSource = ChannelRangeSource | DirectSource;
+-
+-interface EditorExportBody {
+-	source: ExportSource;
+-	edits?: ExportEdits;
+-	output?: ExportOutput;
+-}
+-
+ interface EditorExportControllerOptions {
+ 	videoRenderUseCase: VideoRenderUseCase;
+ 	s3OutputPrefix: string;
+diff --git a/apps/server/src/features/preview/adapters/inbound/http/preview.controller.ts b/apps/server/src/features/preview/adapters/inbound/http/preview.controller.ts
+index e03c487..8e15da0 100644
+--- a/apps/server/src/features/preview/adapters/inbound/http/preview.controller.ts
++++ b/apps/server/src/features/preview/adapters/inbound/http/preview.controller.ts
+@@ -96,7 +96,9 @@ export const previewController: FastifyPluginAsync<PreviewControllerOptions> = a
+ 			});
+ 		}
+ 
+-		const ztubeToken = (request.headers["x-ztube-token"] as string | undefined) ?? "";
++		const cookieHeader = request.headers.cookie ?? "";
++		const cookieMatch = cookieHeader.match(/(?:^|;\s*)ztube-token=([^;]+)/);
++		const ztubeToken = cookieMatch ? decodeURIComponent(cookieMatch[1]) : "";
+ 		const previewSource = new HttpPreviewSourceAdapter(config.CORE_BASE_URL, ztubeToken);
+ 
+ 		try {
+diff --git a/apps/server/src/features/render/adapters/inbound/design/DesignRenderInputAdapter.ts b/apps/server/src/features/render/adapters/inbound/design/DesignRenderInputAdapter.ts
+index 854407c..8bbb929 100644
+--- a/apps/server/src/features/render/adapters/inbound/design/DesignRenderInputAdapter.ts
++++ b/apps/server/src/features/render/adapters/inbound/design/DesignRenderInputAdapter.ts
+@@ -1,4 +1,4 @@
+-import type { DesignPayload } from "../../../adapters/inbound/http/design-payload.schema.ts";
++import type { DesignPayload } from "@video-editor/contract/internal/render";
+ import type { RenderInputPort } from "../../../application/ports/inbound/RenderInputPort.ts";
+ import type { VideoRenderInput } from "../../../application/use-cases/VideoRenderUseCase.ts";
+ import { type IDesign, translate } from "../../../domain/DesignToRenderJobTranslator.ts";
+diff --git a/apps/server/src/features/render/adapters/inbound/http/design-payload.schema.ts b/apps/server/src/features/render/adapters/inbound/http/design-payload.schema.ts
+deleted file mode 100644
+index c9f4085..0000000
+--- a/apps/server/src/features/render/adapters/inbound/http/design-payload.schema.ts
++++ /dev/null
+@@ -1,174 +0,0 @@
+-import { z } from "zod";
+-
+-const parsePx = (v: unknown) => (typeof v === "string" ? Number.parseFloat(v) : v);
+-const px = z.preprocess(parsePx, z.number().default(0));
+-const pxOpt = z.preprocess(parsePx, z.number().optional());
+-
+-const displaySchema = z.object({ from: z.number(), to: z.number() });
+-const trimSchema = z.object({ from: z.number(), to: z.number() });
+-const sizeSchema = z.object({
+-	width: z.number().positive(),
+-	height: z.number().positive(),
+-});
+-
+-const textDetailsSchema = z
+-	.object({
+-		text: z.string().optional(),
+-		left: px,
+-		top: px,
+-		width: px,
+-		height: px,
+-		fontSize: pxOpt,
+-		color: z.string().optional(),
+-		backgroundColor: z.string().optional(),
+-		opacity: z.coerce.number().min(0).max(100).optional(),
+-		textAlign: z.enum(["left", "center", "right"]).optional(),
+-		WebkitTextStrokeWidth: pxOpt,
+-		WebkitTextStrokeColor: z.string().optional(),
+-		borderWidth: pxOpt,
+-		borderColor: z.string().optional(),
+-		transform: z.string().optional(),
+-		boxShadow: z.record(z.string(), z.unknown()).optional(),
+-	})
+-	.passthrough();
+-
+-const videoDetailsSchema = z
+-	.object({
+-		src: z.string().optional(),
+-		left: px,
+-		top: px,
+-		width: px,
+-		height: px,
+-		volume: z.coerce.number().min(0).max(100).default(100),
+-		opacity: z.coerce.number().min(0).max(100).optional(),
+-		blur: pxOpt,
+-		brightness: pxOpt,
+-		borderRadius: pxOpt,
+-		transform: z.string().optional(),
+-		rotate: z.union([z.number(), z.string()]).optional(),
+-		crop: z.object({ x: px, y: px, width: px, height: px }).optional(),
+-	})
+-	.passthrough();
+-
+-const imageDetailsSchema = z
+-	.object({
+-		src: z.string().optional(),
+-		left: px,
+-		top: px,
+-		width: px,
+-		height: px,
+-		opacity: z.coerce.number().min(0).max(100).optional(),
+-		transform: z.string().optional(),
+-	})
+-	.passthrough();
+-
+-const audioDetailsSchema = z
+-	.object({
+-		src: z.string().optional(),
+-		volume: z.coerce.number().min(0).max(100).default(100),
+-	})
+-	.passthrough();
+-
+-const captionDetailsSchema = z
+-	.object({
+-		words: z.array(z.record(z.string(), z.unknown())).optional(),
+-		left: px,
+-		top: px,
+-		width: px,
+-		height: px,
+-		fontSize: pxOpt,
+-		color: z.string().optional(),
+-		backgroundColor: z.string().optional(),
+-		opacity: z.coerce.number().min(0).max(100).optional(),
+-	})
+-	.passthrough();
+-
+-const shapeDetailsSchema = z
+-	.object({
+-		src: z.string().optional(),
+-		left: px,
+-		top: px,
+-		width: px,
+-		height: px,
+-		backgroundColor: z.string().optional(),
+-		borderColor: z.string().optional(),
+-		borderWidth: pxOpt,
+-		opacity: z.coerce.number().min(0).max(100).optional(),
+-	})
+-	.passthrough();
+-
+-const trackItemBaseFields = {
+-	id: z.string(),
+-	display: displaySchema,
+-	trim: trimSchema.optional(),
+-	duration: z.number().optional(),
+-	metadata: z.record(z.string(), z.unknown()).optional(),
+-};
+-
+-const trackItemSchema = z.discriminatedUnion("type", [
+-	z.object({
+-		...trackItemBaseFields,
+-		type: z.literal("text"),
+-		details: textDetailsSchema.optional(),
+-	}),
+-	z.object({
+-		...trackItemBaseFields,
+-		type: z.literal("video"),
+-		details: videoDetailsSchema.optional(),
+-	}),
+-	z.object({
+-		...trackItemBaseFields,
+-		type: z.literal("image"),
+-		details: imageDetailsSchema.optional(),
+-	}),
+-	z.object({
+-		...trackItemBaseFields,
+-		type: z.literal("audio"),
+-		details: audioDetailsSchema.optional(),
+-	}),
+-	z.object({
+-		...trackItemBaseFields,
+-		type: z.literal("caption"),
+-		details: captionDetailsSchema.optional(),
+-	}),
+-	z.object({
+-		...trackItemBaseFields,
+-		type: z.literal("shape"),
+-		details: shapeDetailsSchema.optional(),
+-	}),
+-]);
+-
+-const trackSchema = z.object({
+-	id: z.string(),
+-	type: z.string(),
+-	items: z.array(z.string()),
+-	muted: z.boolean().optional(),
+-});
+-
+-const RENDERABLE_TYPES = new Set(["text", "video", "image", "audio", "caption", "shape"]);
+-
+-export const designPayloadSchema = z.object({
+-	id: z.union([z.string(), z.number()]),
+-	size: sizeSchema,
+-	duration: z.number().optional(),
+-	fps: z.number().positive(),
+-	tracks: z.array(trackSchema),
+-	trackItemIds: z.array(z.string()),
+-	trackItemsMap: z.preprocess(
+-		(val) => {
+-			if (typeof val !== "object" || val === null) return val;
+-			return Object.fromEntries(
+-				Object.entries(val as Record<string, unknown>).filter(([, item]) => {
+-					return (
+-						typeof item === "object" &&
+-						item !== null &&
+-						RENDERABLE_TYPES.has((item as { type?: string }).type ?? "")
+-					);
+-				}),
+-			);
+-		},
+-		z.record(z.string(), trackItemSchema),
+-	),
+-});
+-
+-export type DesignPayload = z.infer<typeof designPayloadSchema>;
+diff --git a/apps/server/src/features/render/adapters/inbound/http/render.controller.ts b/apps/server/src/features/render/adapters/inbound/http/render.controller.ts
+index da053e5..ea8dbe0 100644
+--- a/apps/server/src/features/render/adapters/inbound/http/render.controller.ts
++++ b/apps/server/src/features/render/adapters/inbound/http/render.controller.ts
+@@ -1,16 +1,16 @@
+ import { randomUUID } from "node:crypto";
+-import { savedMediaPayloadSchema } from "@video-editor/contract";
++import { savedMediaPayloadSchema } from "@video-editor/contract/events";
++import type { RenderRequest } from "@video-editor/contract/internal/edit-video";
++import { designPayloadSchema } from "@video-editor/contract/internal/render";
+ import { Logger } from "@ztube/observability";
+ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
+ import type { z } from "zod";
+ import type { ExportEventPublisherPort } from "../../../../../infrastructure/messaging/RabbitMQPublisher.ts";
+ import { getOutputFilename } from "../../../../../shared/utils/file.utils.ts";
+ import { HttpStatus } from "../../../../../shared/utils/http-status.ts";
+-import type { RenderRequest } from "../../../../edit-video/adapters/inbound/http/edit-video.types.ts";
+ import type { RenderJobStatePort } from "../../../application/ports/outbound/RenderJobStatePort.ts";
+ import type { VideoRenderUseCase } from "../../../application/use-cases/VideoRenderUseCase.ts";
+ import { DesignRenderInputAdapter } from "../design/DesignRenderInputAdapter.ts";
+-import { designPayloadSchema } from "./design-payload.schema.ts";
+ 
+ const saveMetadataSchema = savedMediaPayloadSchema.omit({ exportType: true });
+ type SaveMetadata = z.infer<typeof saveMetadataSchema>;
+diff --git a/apps/server/src/features/render/application/use-cases/VideoRenderUseCase.ts b/apps/server/src/features/render/application/use-cases/VideoRenderUseCase.ts
+index 2e1d933..528ec8b 100644
+--- a/apps/server/src/features/render/application/use-cases/VideoRenderUseCase.ts
++++ b/apps/server/src/features/render/application/use-cases/VideoRenderUseCase.ts
+@@ -1,6 +1,6 @@
++import type { AudioSource, Overlay, VideoSource } from "@video-editor/contract/internal/edit-video";
++import type { TimeRange } from "@video-editor/contract/internal/shared";
+ import type { VideoRenderPort } from "../../../../shared/application/ports/outbound/VideoRenderPort.ts";
+-import type { AudioSource, Overlay, VideoSource } from "../../../../shared/domain/render-types.ts";
+-import type { TimeRange } from "../../../../shared/domain/TimeRange.ts";
+ import {
+ 	calculateKeepSegments,
+ 	calculateTotalDurationSegments,
+diff --git a/apps/server/src/features/render/domain/__tests__/DesignToRenderJobTranslator.test.ts b/apps/server/src/features/render/domain/__tests__/DesignToRenderJobTranslator.test.ts
+index 021e288..5e61557 100644
+--- a/apps/server/src/features/render/domain/__tests__/DesignToRenderJobTranslator.test.ts
++++ b/apps/server/src/features/render/domain/__tests__/DesignToRenderJobTranslator.test.ts
+@@ -1,5 +1,5 @@
++import { designPayloadSchema } from "@video-editor/contract/internal/render";
+ import { describe, expect, it } from "vitest";
+-import { designPayloadSchema } from "../../adapters/inbound/http/design-payload.schema.ts";
+ import type { IDesign, ITrackItemBase } from "../DesignToRenderJobTranslator.ts";
+ import { translate } from "../DesignToRenderJobTranslator.ts";
+ 
+diff --git a/apps/server/src/features/upload/adapters/inbound/http/upload.controller.ts b/apps/server/src/features/upload/adapters/inbound/http/upload.controller.ts
+index 8b4e938..dbac9e8 100644
+--- a/apps/server/src/features/upload/adapters/inbound/http/upload.controller.ts
++++ b/apps/server/src/features/upload/adapters/inbound/http/upload.controller.ts
+@@ -1,14 +1,14 @@
+ import path from "node:path";
+-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
+-import type { Request } from "../../../../../infrastructure/fastify/fastify.ts";
+-import { HttpStatus } from "../../../../../shared/utils/http-status.ts";
+-import type { UploadUseCase } from "../../../application/use-cases/UploadUseCase.ts";
+ import {
+ 	type CleanupRequest,
+ 	cleanupRequestSchema,
+ 	type GetSignedUrlRequest,
+ 	getSignedUrlRequestSchema,
+-} from "./upload.schema.ts";
++} from "@video-editor/contract/internal/upload";
++import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
++import type { Request } from "../../../../../infrastructure/fastify/fastify.ts";
++import { HttpStatus } from "../../../../../shared/utils/http-status.ts";
++import type { UploadUseCase } from "../../../application/use-cases/UploadUseCase.ts";
+ 
+ const ALLOWED_MIMES = [
+ 	"video/mp4",
+diff --git a/apps/server/src/features/upload/adapters/inbound/http/upload.schema.ts b/apps/server/src/features/upload/adapters/inbound/http/upload.schema.ts
+deleted file mode 100644
+index 003b3f0..0000000
+--- a/apps/server/src/features/upload/adapters/inbound/http/upload.schema.ts
++++ /dev/null
+@@ -1,48 +0,0 @@
+-import { z } from "zod";
+-
+-const errorResponseSchema = z.object({
+-	error: z.string(),
+-});
+-
+-const getSignedUrlBodySchema = z.object({
+-	filename: z.string().min(1),
+-	mimetype: z.string().min(1),
+-});
+-
+-const getSignedUrlResponseSchema = z.object({
+-	uploadUrl: z.string(),
+-	s3Key: z.string(),
+-	filename: z.string(),
+-	publicUrl: z.string(),
+-});
+-
+-export const getSignedUrlRequestSchema = {
+-	body: getSignedUrlBodySchema,
+-	response: {
+-		200: getSignedUrlResponseSchema,
+-		400: errorResponseSchema,
+-		500: errorResponseSchema,
+-	},
+-};
+-
+-const cleanupBodySchema = z.object({
+-	s3Keys: z.array(z.string().min(1)).min(1),
+-});
+-
+-const cleanupResponseSchema = z.object({
+-	deleted: z.number(),
+-	deletedFiles: z.array(z.string()),
+-	errors: z.array(z.string()).optional(),
+-});
+-
+-export const cleanupRequestSchema = {
+-	body: cleanupBodySchema,
+-	response: {
+-		200: cleanupResponseSchema,
+-		400: errorResponseSchema,
+-		500: errorResponseSchema,
+-	},
+-};
+-
+-export type GetSignedUrlRequest = z.infer<typeof getSignedUrlBodySchema>;
+-export type CleanupRequest = z.infer<typeof cleanupBodySchema>;
+diff --git a/apps/server/src/infrastructure/ffmpeg/FfmpegVideoProcessor.ts b/apps/server/src/infrastructure/ffmpeg/FfmpegVideoProcessor.ts
+index 9fba252..589f4bf 100644
+--- a/apps/server/src/infrastructure/ffmpeg/FfmpegVideoProcessor.ts
++++ b/apps/server/src/infrastructure/ffmpeg/FfmpegVideoProcessor.ts
+@@ -2,11 +2,11 @@ import { spawn } from "node:child_process";
+ import fs, { existsSync, promises as fsp } from "node:fs";
+ import path from "node:path";
+ import { PassThrough } from "node:stream";
++import type { Overlay, VideoSource } from "@video-editor/contract/internal/edit-video";
++import type { TimeRange } from "@video-editor/contract/internal/shared";
+ import sharp from "sharp";
+ import type { EnvConfig } from "../../config/env.ts";
+ import type { StoragePort } from "../../shared/application/ports/outbound/StoragePort.ts";
+-import type { Overlay, VideoSource } from "../../shared/domain/render-types.ts";
+-import type { TimeRange } from "../../shared/domain/TimeRange.ts";
+ import { normalizeFfmpegDuration, normalizeFfmpegTime } from "../../shared/utils/time.utils.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "./ffmpeg.consts.ts";
+ import { ffmpegSemaphore, getFfmpegPath, hasAudioStream, runFfmpeg } from "./ffmpeg.utils.ts";
+diff --git a/apps/server/src/infrastructure/ffmpeg/ffmpeg-command.builder.ts b/apps/server/src/infrastructure/ffmpeg/ffmpeg-command.builder.ts
+index 41daf5d..a2c73a1 100644
+--- a/apps/server/src/infrastructure/ffmpeg/ffmpeg-command.builder.ts
++++ b/apps/server/src/infrastructure/ffmpeg/ffmpeg-command.builder.ts
+@@ -1,5 +1,5 @@
++import type { Overlay, VideoSource } from "@video-editor/contract/internal/edit-video";
+ import type { EnvConfig } from "../../config/env.ts";
+-import type { Overlay, VideoSource } from "../../shared/domain/render-types.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "./ffmpeg.consts.ts";
+ import { buildOverlayFilters, type PreparedOverlayInput } from "./overlays/overlay.service.ts";
+ import { buildWatermarkFilterParts } from "./overlays/watermark.service.ts";
+diff --git a/apps/server/src/infrastructure/ffmpeg/ffmpeg.utils.ts b/apps/server/src/infrastructure/ffmpeg/ffmpeg.utils.ts
+index b351147..f91e786 100644
+--- a/apps/server/src/infrastructure/ffmpeg/ffmpeg.utils.ts
++++ b/apps/server/src/infrastructure/ffmpeg/ffmpeg.utils.ts
+@@ -1,8 +1,8 @@
+ import { spawn } from "node:child_process";
+ import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
++import type { VideoMetadata } from "@video-editor/contract/internal/shared";
+ import { Logger } from "@ztube/observability";
+ import ffprobeStatic from "ffprobe-static";
+-import type { VideoMetadata } from "../../shared/domain/VideoMetadata.ts";
+ 
+ const FFPROBE_QUIET = "-v";
+ const FFPROBE_QUIET_LEVEL = "quiet";
+diff --git a/apps/server/src/infrastructure/ffmpeg/overlays/circle-overlay.service.ts b/apps/server/src/infrastructure/ffmpeg/overlays/circle-overlay.service.ts
+index 021fc3a..9f206bd 100644
+--- a/apps/server/src/infrastructure/ffmpeg/overlays/circle-overlay.service.ts
++++ b/apps/server/src/infrastructure/ffmpeg/overlays/circle-overlay.service.ts
+@@ -1,6 +1,6 @@
+ import path from "node:path";
++import type { CircleOverlay } from "@video-editor/contract/internal/edit-video";
+ import sharp from "sharp";
+-import type { CircleOverlay } from "../../../shared/domain/render-types.ts";
+ import { buildCircleSvg } from "../../../shared/utils/icons/circle.ts";
+ import { buildEnableExpression, buildPositionExpression } from "./overlay-utils.ts";
+ 
+diff --git a/apps/server/src/infrastructure/ffmpeg/overlays/image-overlay.service.ts b/apps/server/src/infrastructure/ffmpeg/overlays/image-overlay.service.ts
+index 96cd155..f36dd97 100644
+--- a/apps/server/src/infrastructure/ffmpeg/overlays/image-overlay.service.ts
++++ b/apps/server/src/infrastructure/ffmpeg/overlays/image-overlay.service.ts
+@@ -1,6 +1,6 @@
+ import { access } from "node:fs/promises";
+ import path from "node:path";
+-import type { ImageOverlay } from "../../../shared/domain/render-types.ts";
++import type { ImageOverlay } from "@video-editor/contract/internal/edit-video";
+ import { downloadFile } from "../../../shared/utils/file.utils.ts";
+ import { convertWebpToPng, getImageExtension } from "../source-processors/image-process.ts";
+ import { buildEnableExpression, buildPositionExpression } from "./overlay-utils.ts";
+diff --git a/apps/server/src/infrastructure/ffmpeg/overlays/overlay.service.ts b/apps/server/src/infrastructure/ffmpeg/overlays/overlay.service.ts
+index aeeb621..8e8ac29 100644
+--- a/apps/server/src/infrastructure/ffmpeg/overlays/overlay.service.ts
++++ b/apps/server/src/infrastructure/ffmpeg/overlays/overlay.service.ts
+@@ -1,7 +1,7 @@
++import type { Overlay } from "@video-editor/contract/internal/edit-video";
++import { OverlayType } from "@video-editor/contract/internal/shared";
+ import type { EnvConfig } from "../../../config/env.ts";
+ import type { StoragePort } from "../../../shared/application/ports/outbound/StoragePort.ts";
+-import { OverlayType } from "../../../shared/domain/OverlayType.ts";
+-import type { Overlay } from "../../../shared/domain/render-types.ts";
+ import { buildCircleOverlayFilter, prepareCircleOverlay } from "./circle-overlay.service.ts";
+ import { buildImageOverlayFilter, prepareImageOverlay } from "./image-overlay.service.ts";
+ import { buildRectangleOverlayFilter } from "./rectangle-overlay.service.ts";
+diff --git a/apps/server/src/infrastructure/ffmpeg/overlays/rectangle-overlay.service.ts b/apps/server/src/infrastructure/ffmpeg/overlays/rectangle-overlay.service.ts
+index d49f838..4729c42 100644
+--- a/apps/server/src/infrastructure/ffmpeg/overlays/rectangle-overlay.service.ts
++++ b/apps/server/src/infrastructure/ffmpeg/overlays/rectangle-overlay.service.ts
+@@ -1,4 +1,4 @@
+-import type { RectangleOverlay } from "../../../shared/domain/render-types.ts";
++import type { RectangleOverlay } from "@video-editor/contract/internal/edit-video";
+ import { buildEnableExpression, hexToRgb } from "./overlay-utils.ts";
+ 
+ const DEFAULT_SIZE = 200;
+diff --git a/apps/server/src/infrastructure/ffmpeg/overlays/shape-overlay.service.ts b/apps/server/src/infrastructure/ffmpeg/overlays/shape-overlay.service.ts
+index ebfbb9f..85ac932 100644
+--- a/apps/server/src/infrastructure/ffmpeg/overlays/shape-overlay.service.ts
++++ b/apps/server/src/infrastructure/ffmpeg/overlays/shape-overlay.service.ts
+@@ -1,6 +1,6 @@
+ import path from "node:path";
++import type { ShapeOverlay } from "@video-editor/contract/internal/edit-video";
+ import sharp from "sharp";
+-import type { ShapeOverlay } from "../../../shared/domain/render-types.ts";
+ import { buildEnableExpression, buildPositionExpression } from "./overlay-utils.ts";
+ 
+ const DEFAULT_SIZE = 100;
+diff --git a/apps/server/src/infrastructure/ffmpeg/overlays/text-overlay.service.ts b/apps/server/src/infrastructure/ffmpeg/overlays/text-overlay.service.ts
+index 9b9d705..a29adad 100644
+--- a/apps/server/src/infrastructure/ffmpeg/overlays/text-overlay.service.ts
++++ b/apps/server/src/infrastructure/ffmpeg/overlays/text-overlay.service.ts
+@@ -1,4 +1,4 @@
+-import type { TextOverlay } from "../../../shared/domain/render-types.ts";
++import type { TextOverlay } from "@video-editor/contract/internal/edit-video";
+ import { getFontFileParameter, prepareRTLText } from "../../../shared/utils/font.utils.ts";
+ import {
+ 	buildEnableExpression,
+diff --git a/apps/server/src/infrastructure/ffmpeg/overlays/video-overlay.service.ts b/apps/server/src/infrastructure/ffmpeg/overlays/video-overlay.service.ts
+index e23d407..5ad7d45 100644
+--- a/apps/server/src/infrastructure/ffmpeg/overlays/video-overlay.service.ts
++++ b/apps/server/src/infrastructure/ffmpeg/overlays/video-overlay.service.ts
+@@ -1,8 +1,8 @@
+ import { promises as fsp } from "node:fs";
+ import path from "node:path";
++import type { VideoOverlay } from "@video-editor/contract/internal/edit-video";
+ import type { EnvConfig } from "../../../config/env.ts";
+ import type { StoragePort } from "../../../shared/application/ports/outbound/StoragePort.ts";
+-import type { VideoOverlay } from "../../../shared/domain/render-types.ts";
+ import { normalizeFfmpegDuration, normalizeFfmpegTime } from "../../../shared/utils/time.utils.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "../ffmpeg.consts.ts";
+ import { runFfmpeg } from "../ffmpeg.utils.ts";
+diff --git a/apps/server/src/infrastructure/ffmpeg/source-processors/audio-process.ts b/apps/server/src/infrastructure/ffmpeg/source-processors/audio-process.ts
+index 39d37ac..90ea7a5 100644
+--- a/apps/server/src/infrastructure/ffmpeg/source-processors/audio-process.ts
++++ b/apps/server/src/infrastructure/ffmpeg/source-processors/audio-process.ts
+@@ -2,7 +2,7 @@ import { promises as fsp } from "node:fs";
+ import path from "node:path";
+ import type { EnvConfig } from "../../../config/env.ts";
+ import type { StoragePort } from "../../../shared/application/ports/outbound/StoragePort.ts";
+-import type { AudioSource } from "../../../shared/domain/render-types.ts";
++import type { AudioSource } from "@video-editor/contract/internal/edit-video";
+ import { normalizeFfmpegDuration, normalizeFfmpegTime } from "../../../shared/utils/time.utils.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "../ffmpeg.consts.ts";
+ import { hasAudioStream, runFfmpeg } from "../ffmpeg.utils.ts";
+diff --git a/apps/server/src/infrastructure/ffmpeg/source-processors/dash-process.ts b/apps/server/src/infrastructure/ffmpeg/source-processors/dash-process.ts
+index 0239dab..177d90c 100644
+--- a/apps/server/src/infrastructure/ffmpeg/source-processors/dash-process.ts
++++ b/apps/server/src/infrastructure/ffmpeg/source-processors/dash-process.ts
+@@ -1,8 +1,8 @@
+ import { promises as fsp } from "node:fs";
++import type { VideoSource } from "@video-editor/contract/internal/edit-video";
+ import { Logger } from "@ztube/observability";
+ import type { EnvConfig } from "../../../config/env.ts";
+ import { validateMpdRestrictions } from "../../../features/edit-video/domain/video-segment.policy.ts";
+-import type { VideoSource } from "../../../shared/domain/render-types.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "../ffmpeg.consts.ts";
+ import { runFfmpeg } from "../ffmpeg.utils.ts";
+ 
+diff --git a/apps/server/src/infrastructure/ffmpeg/source-processors/hls-process.ts b/apps/server/src/infrastructure/ffmpeg/source-processors/hls-process.ts
+index d402201..dc8783c 100644
+--- a/apps/server/src/infrastructure/ffmpeg/source-processors/hls-process.ts
++++ b/apps/server/src/infrastructure/ffmpeg/source-processors/hls-process.ts
+@@ -1,6 +1,6 @@
++import type { VideoSource } from "@video-editor/contract/internal/edit-video";
+ import { Logger } from "@ztube/observability";
+ import type { EnvConfig } from "../../../config/env.ts";
+-import type { VideoSource } from "../../../shared/domain/render-types.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "../ffmpeg.consts.ts";
+ import { runFfmpeg } from "../ffmpeg.utils.ts";
+ 
+diff --git a/apps/server/src/infrastructure/ffmpeg/source-processors/image-process.ts b/apps/server/src/infrastructure/ffmpeg/source-processors/image-process.ts
+index 622109d..9d7cdca 100644
+--- a/apps/server/src/infrastructure/ffmpeg/source-processors/image-process.ts
++++ b/apps/server/src/infrastructure/ffmpeg/source-processors/image-process.ts
+@@ -1,7 +1,7 @@
+ import path from "node:path";
++import type { VideoSource } from "@video-editor/contract/internal/edit-video";
+ import sharp from "sharp";
+ import type { StoragePort } from "../../../shared/application/ports/outbound/StoragePort.ts";
+-import type { VideoSource } from "../../../shared/domain/render-types.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "../ffmpeg.consts.ts";
+ import { runFfmpeg } from "../ffmpeg.utils.ts";
+ 
+diff --git a/apps/server/src/infrastructure/ffmpeg/source-processors/process-sources.ts b/apps/server/src/infrastructure/ffmpeg/source-processors/process-sources.ts
+index 2f4ec7b..7d3fd8c 100644
+--- a/apps/server/src/infrastructure/ffmpeg/source-processors/process-sources.ts
++++ b/apps/server/src/infrastructure/ffmpeg/source-processors/process-sources.ts
+@@ -1,8 +1,8 @@
+ import { existsSync, promises as fsp } from "node:fs";
+ import path from "node:path";
++import type { VideoSource } from "@video-editor/contract/internal/edit-video";
+ import type { EnvConfig } from "../../../config/env.ts";
+ import type { StoragePort } from "../../../shared/application/ports/outbound/StoragePort.ts";
+-import type { VideoSource } from "../../../shared/domain/render-types.ts";
+ import { normalizeFfmpegDuration, normalizeFfmpegTime } from "../../../shared/utils/time.utils.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "../ffmpeg.consts.ts";
+ import { runFfmpeg } from "../ffmpeg.utils.ts";
+diff --git a/apps/server/src/shared/application/ports/outbound/VideoRenderPort.ts b/apps/server/src/shared/application/ports/outbound/VideoRenderPort.ts
+index 1804b7d..8dfb29c 100644
+--- a/apps/server/src/shared/application/ports/outbound/VideoRenderPort.ts
++++ b/apps/server/src/shared/application/ports/outbound/VideoRenderPort.ts
+@@ -1,5 +1,5 @@
+-import type { AudioSource, Overlay, VideoSource } from "../../../domain/render-types.ts";
+-import type { TimeRange } from "../../../domain/TimeRange.ts";
++import type { AudioSource, Overlay, VideoSource } from "@video-editor/contract/internal/edit-video";
++import type { TimeRange } from "@video-editor/contract/internal/shared";
+ 
+ export interface RenderJob {
+ 	sources: VideoSource[];
+diff --git a/apps/server/src/shared/domain/OverlayType.ts b/apps/server/src/shared/domain/OverlayType.ts
+deleted file mode 100644
+index e6ed326..0000000
+--- a/apps/server/src/shared/domain/OverlayType.ts
++++ /dev/null
+@@ -1,8 +0,0 @@
+-export const OverlayType = {
+-	text: "text",
+-	image: "image",
+-	video: "video",
+-	rectangle: "rectangle",
+-	circle: "circle",
+-	shape: "shape",
+-} as const;
+diff --git a/apps/server/src/shared/domain/TimeRange.ts b/apps/server/src/shared/domain/TimeRange.ts
+deleted file mode 100644
+index c3b6bda..0000000
+--- a/apps/server/src/shared/domain/TimeRange.ts
++++ /dev/null
+@@ -1,4 +0,0 @@
+-export interface TimeRange {
+-	start: number;
+-	end: number;
+-}
+diff --git a/apps/server/src/shared/domain/VideoMetadata.ts b/apps/server/src/shared/domain/VideoMetadata.ts
+deleted file mode 100644
+index d57ca02..0000000
+--- a/apps/server/src/shared/domain/VideoMetadata.ts
++++ /dev/null
+@@ -1,5 +0,0 @@
+-export interface VideoMetadata {
+-	duration: number;
+-	width: number;
+-	height: number;
+-}
+diff --git a/apps/server/src/shared/domain/render-types.ts b/apps/server/src/shared/domain/render-types.ts
+deleted file mode 100644
+index e4c3660..0000000
+--- a/apps/server/src/shared/domain/render-types.ts
++++ /dev/null
+@@ -1,11 +0,0 @@
+-export type {
+-	AudioSource,
+-	CircleOverlay,
+-	ImageOverlay,
+-	Overlay,
+-	RectangleOverlay,
+-	ShapeOverlay,
+-	TextOverlay,
+-	VideoOverlay,
+-	VideoSource,
+-} from "../../features/edit-video/adapters/inbound/http/edit-video.types.ts";
+diff --git a/biome.json b/biome.json
+index 77e2c35..e0cca62 100644
+--- a/biome.json
++++ b/biome.json
+@@ -118,7 +118,7 @@
+ 			}
+ 		},
+ 		{
+-			"includes": ["packages/*/src/index.ts", "packages/*/src/*/index.ts"],
++			"includes": ["packages/*/src/index.ts", "packages/*/src/**/index.ts"],
+ 			"linter": {
+ 				"rules": {
+ 					"performance": {
+diff --git a/packages/contract/CLAUDE.md b/packages/contract/CLAUDE.md
+index dab4c65..78628a7 100644
+--- a/packages/contract/CLAUDE.md
++++ b/packages/contract/CLAUDE.md
+@@ -4,10 +4,18 @@
+ >
+ > **Keep this file updated:** Update whenever message types, schemas, exports, or routing keys change.
+ 
+-Published as `@video-editor/contract`. Defines:
+-- **iframe protocol** — Zod schemas + TS types for `postMessage` between the editor and its parent (`./iframe`).
+-- **AMQP events** — versioned envelope + Zod schemas for events published by `apps/server` to RabbitMQ (`./events`).
+-- **shared** — reusable payload types (`SavedMediaItem`, `SavedMediaPayload`) used by both iframe and events.
++Published as `@video-editor/contract`. Three subpath patterns — no root barrel, no separate `mocks` exports.
++
++| Subpath | Purpose | Audience |
++|---|---|---|
++| `./iframe/from-parent` | Parent → editor postMessage | Parent team + editor frontend |
++| `./iframe/to-parent` | Editor → parent postMessage | Parent team + editor frontend |
++| `./events` | RabbitMQ events (`video-editor` topic exchange) | Event consumers |
++| `./internal/<feature>` | Server-owner HTTP API schemas | **`apps/server` only** |
++
++`SavedMediaItem` / `SavedMediaPayload` are re-exported from both `iframe/to-parent` and `events` (same shape used in `EDITOR_MEDIA_SAVED` and `export.started.data`). Internally they live in `src/shared/saved-media.ts` — not exposed directly via `package.json`.
++
++**One source of truth:** every TS type is `z.infer<typeof schema>`. No hand-written types living next to schemas.
+ 
+ ## Commands
+ 
+@@ -23,64 +31,49 @@ pnpm format       # biome format . --write
+ 
+ ```
+ src/
+-├── index.ts                 # Root barrel — re-exports iframe + shared
+ ├── iframe/
+-│   ├── index.ts             # iframe barrel
+-│   ├── messages.ts          # Message type definitions
+-│   ├── payloads.ts          # Payload interfaces
+-│   ├── schemas.ts           # Zod validation schemas
+-│   ├── helpers.ts           # Factory functions
+-│   ├── mocks.ts             # Mock fixtures
+-│   └── helpers.test.ts      # Test suite
++│   ├── from-parent/
++│   │   ├── __tests__/schemas.test.ts
++│   │   ├── schemas.ts           # Zod + z.infer types
++│   │   ├── helpers.ts           # parse / safeParse wrappers
++│   │   ├── mocks.ts             # internal fixtures
++│   │   └── index.ts
++│   └── to-parent/
++│       ├── __tests__/schemas.test.ts
++│       ├── schemas.ts
++│       ├── helpers.ts           # create* factories
++│       ├── mocks.ts
++│       └── index.ts             # + re-exports SavedMedia* from ../shared
+ ├── events/
+-│   ├── index.ts             # events barrel
+-│   ├── envelope.ts          # Envelope<T> + header-key constants
+-│   ├── export.ts            # v1 schemas for export.started/completed/failed
+-│   ├── mocks.ts             # Mock envelopes
+-│   ├── export.test.ts       # Schema tests
+-│   └── README.md            # External-team onboarding doc
+-└── shared/
+-    ├── saved-media.ts       # SavedMediaItem, SavedMediaPayload
+-    └── saved-media.test.ts  # Schema tests
++│   ├── __tests__/export.test.ts
++│   ├── envelope.ts
++│   ├── export.ts
++│   ├── mocks.ts
++│   ├── README.md
++│   └── index.ts                 # + re-exports SavedMedia* from ../shared
++├── shared/                      # NOT in package.json exports
++│   ├── __tests__/saved-media.test.ts
++│   └── saved-media.ts           # SavedMediaItem / SavedMediaPayload (z.infer)
++└── internal/
++    ├── upload/{schemas,index}.ts
++    ├── edit-video/{schemas,index}.ts
++    ├── render/{design-payload.schema,index}.ts
++    ├── editor-export/{types,index}.ts
++    └── shared/{overlay-type,time-range,video-metadata,index}.ts
+ ```
+ 
+-## Package Exports
++## Package Exports (wildcards)
+ 
+ ```json
+-"exports": {
+-  ".":               "./dist/index.js",
+-  "./iframe":        "./dist/iframe/index.js",
+-  "./iframe/mocks":  "./dist/iframe/mocks.js",
+-  "./events":        "./dist/events/index.js",
+-  "./events/mocks":  "./dist/events/mocks.js"
++{
++  "./iframe/*":   "./dist/iframe/*/index.js",
++  "./events":     "./dist/events/index.js",
++  "./internal/*": "./dist/internal/*/index.js"
+ }
+ ```
+ 
+-## Key Exports
+-
+-### `@video-editor/contract/iframe`
+-
+-- `parentToEditorMessageSchema`, `editorToParentMessageSchema` — Zod schemas
+-- `ParentToEditorMessage`, `EditorToParentMessage` and subtypes
+-- `PreviewItemPayload` union (`recording-range`, `media`, `audio-range`)
+-- `EditorReadyMessage`, `EditorMediaSavedMessage`
+-- Factories: `createPreviewItemAddedMessage`, `createPreviewItemRejectedMessage`, `createProjectClearedMessage`, `createMediaSavedMessage`
+-
+-### `@video-editor/contract/events`
+-
+-- `EXCHANGE_NAME` (`"video-editor"`), routing-key constants (`EXPORT_STARTED`, `EXPORT_COMPLETED`, `EXPORT_FAILED`)
+-- Version constants (`EXPORT_STARTED_V1` …)
+-- AMQP header constants (`X_EVENT_NAME`, `X_EVENT_VERSION`)
+-- `Envelope<T>` type + `envelopeSchema(dataSchema)` factory
+-- Per-event Zod schemas + TS types: `exportStartedEnvelopeSchema`, `ExportStartedData`, etc.
+-- `mockExportStartedEnvelope` etc. via `./events/mocks`
+-
+-See [`src/events/README.md`](src/events/README.md) for the consumer-side onboarding doc.
+-
+-### Root (`@video-editor/contract`)
+-
+-Re-exports `iframe/*` + `shared/*` for convenience.
++Three patterns cover every public surface. Mocks live in `mocks.ts` next to each bucket but are **not** exported via package.json — tests import them with relative paths only.
+ 
+ ## Dependencies
+ 
+-- `zod` v4 — runtime validation
++- `zod` v4 — runtime validation. Every TS type is `z.infer<typeof schema>`.
+diff --git a/packages/contract/README.md b/packages/contract/README.md
+index 3ca44a9..5e74be4 100644
+--- a/packages/contract/README.md
++++ b/packages/contract/README.md
+@@ -1,67 +1,50 @@
+ # @video-editor/contract
+ 
+-Shared contracts for the video editor: the iframe `postMessage` protocol and the AMQP event envelopes published to RabbitMQ. Pure Zod schemas and TypeScript types — no runtime network calls.
++Shared contracts for the video editor. Pure Zod schemas + TypeScript types — no runtime network calls. Every TS type is derived via `z.infer<typeof schema>` so schemas and types never drift.
+ 
+-## Overview
++## Three Subpaths
+ 
+-Three import surfaces, one package:
++| Subpath | Direction / Owner | Who imports |
++|---|---|---|
++| `@video-editor/contract/iframe/from-parent` | Parent **sends** to editor | Parent app + editor frontend |
++| `@video-editor/contract/iframe/to-parent` | Editor **sends** to parent | Parent app + editor frontend |
++| `@video-editor/contract/events` | Server **publishes** to RabbitMQ | Anyone consuming events |
++| `@video-editor/contract/internal/<feature>` | Editor server's own HTTP API schemas | **`apps/server` only** — external teams must not import |
+ 
+-- **`@video-editor/contract/iframe`** — `postMessage` protocol between the editor iframe (`/editor/embed`) and any host page.
+-- **`@video-editor/contract/events`** — versioned `Envelope<T>` and Zod schemas for events published by `apps/server` to the `video-editor` topic exchange.
+-- **`@video-editor/contract`** (root) — convenience re-export of `iframe/*` plus shared payload types (`SavedMediaItem`, `SavedMediaPayload`).
++`SavedMediaItem` / `SavedMediaPayload` are re-exported from both `iframe/to-parent` and `events` (same shape used in `EDITOR_MEDIA_SAVED` and `export.started.data`). Pick whichever subpath matches your context.
+ 
+-> [!NOTE]
+-> External teams consume `/events` from their own services. Treat the event schemas as a public API and follow the [versioning policy](src/events/README.md#versioning-policy) when changing them.
++There is no root `@video-editor/contract` export. Every caller imports a subpath so the bucket they touch is explicit.
+ 
+ ## Installation
+ 
+-Workspace dependency inside the monorepo:
+-
+ ```json
+-{
+-  "dependencies": {
+-    "@video-editor/contract": "workspace:*"
+-  }
+-}
++{ "dependencies": { "@video-editor/contract": "workspace:*" } }
+ ```
+ 
+-## Subpath Exports
+-
+-| Import path | Purpose |
+-|---|---|
+-| `@video-editor/contract` | Iframe protocol + shared payload types (re-export) |
+-| `@video-editor/contract/iframe` | Iframe `postMessage` schemas, types, factories |
+-| `@video-editor/contract/iframe/mocks` | Fixture builders for iframe messages (test-only) |
+-| `@video-editor/contract/events` | AMQP envelope, routing-key constants, per-event schemas |
+-| `@video-editor/contract/events/mocks` | Fixture builders for event envelopes (test-only) |
+-
+-Mocks live behind separate subpaths so test helpers stay out of production bundles.
+-
+ ## Iframe Protocol
+ 
+ ```
+-Host page                        Editor iframe (at /editor/embed)
++Parent page                       Editor iframe (at /editor/embed)
+ ─────────────────────────────────────────────────────────────────
+-                                 ──EDITOR_READY──────────────────▶
+-◀── EDITOR_ADD_PREVIEW_ITEM ─────
+-         ─────────────── preview_item_added / preview_item_rejected ──▶
+-◀── EDITOR_CLEAR_PROJECT ────────
+-         ─────────────────────────────────── project_cleared ──────▶
+-◀── EDITOR_SET_AUTH ─────────────
+-         ────────────────────────────────────── media_saved ──────▶
++                                  ──EDITOR_READY──────────────────▶
++◀── EDITOR_ADD_PREVIEW_ITEM ──────
++         ─────────────── EDITOR_PREVIEW_ITEM_ADDED / EDITOR_PREVIEW_ITEM_REJECTED ──▶
++◀── EDITOR_CLEAR_PROJECT ─────────
++         ─────────────────────────────────── EDITOR_PROJECT_CLEARED ──▶
++         ────────────────────────────────────── EDITOR_MEDIA_SAVED ──▶
+ ```
+ 
+-### Validate incoming messages
++### Validate incoming messages (parent → editor)
+ 
+ ```ts
+-import { parentToEditorMessageSchema } from "@video-editor/contract/iframe";
++import { parentToEditorMessageSchema } from "@video-editor/contract/iframe/from-parent";
+ 
+ const result = parentToEditorMessageSchema.safeParse(event.data);
+ if (!result.success) return;
+ // result.data is fully typed
+ ```
+ 
+-### Build response messages
++### Build response messages (editor → parent)
+ 
+ ```ts
+ import {
+@@ -69,12 +52,12 @@ import {
+   createPreviewItemRejectedMessage,
+   createProjectClearedMessage,
+   createMediaSavedMessage,
+-} from "@video-editor/contract/iframe";
++} from "@video-editor/contract/iframe/to-parent";
+ 
+-window.parent.postMessage(createPreviewItemAddedMessage({ itemId }), targetOrigin);
++window.parent.postMessage(createPreviewItemAddedMessage(itemId), targetOrigin);
+ ```
+ 
+-### `PreviewItemPayload`
++### `PreviewItemPayload` (inbound)
+ 
+ Discriminated union on `kind`:
+ 
+@@ -84,15 +67,9 @@ Discriminated union on `kind`:
+ | `media` | A generic media asset |
+ | `audio-range` | An audio segment with a time range |
+ 
+-### Mocks
+-
+-```ts
+-import { mockEditorReadyMessage } from "@video-editor/contract/iframe/mocks";
+-```
+-
+ ## Events
+ 
+-Single topic exchange `video-editor`. Three routing keys today:
++Single topic exchange `video-editor`. Three routing keys:
+ 
+ | Routing key | Purpose |
+ |---|---|
+@@ -108,44 +85,52 @@ import {
+ } from "@video-editor/contract/events";
+ ```
+ 
+-See [`src/events/README.md`](src/events/README.md) for the full consumer onboarding doc — envelope shape, AMQP headers, queue binding, dead-lettering, versioning, and delivery guarantees.
+-
+-## Shared Payloads
++See [`src/events/README.md`](src/events/README.md) for envelope shape, AMQP headers, queue binding, dead-lettering, versioning, delivery guarantees.
+ 
+-Re-exported from the root for use by both iframe and event consumers:
++## Internal (server-owner only)
+ 
+ ```ts
+-import {
+-  type SavedMediaItem,
+-  type SavedMediaPayload,
+-  savedMediaItemSchema,
+-  savedMediaPayloadSchema,
+-} from "@video-editor/contract";
++import { designPayloadSchema } from "@video-editor/contract/internal/render";
++import { editVideoRequestSchema } from "@video-editor/contract/internal/edit-video";
++import { getSignedUrlRequestSchema } from "@video-editor/contract/internal/upload";
++import { OverlayType, type TimeRange } from "@video-editor/contract/internal/shared";
+ ```
+ 
++External consumers must not import `/internal/*`. See `docs/adr/0004-server-http-schemas-in-shared-contract-package.md`.
++
+ ## Source Structure
+ 
+ ```
+ src/
+-├── index.ts                 # Root barrel — re-exports iframe + shared
+ ├── iframe/
+-│   ├── index.ts             # iframe barrel
+-│   ├── messages.ts          # Message type definitions
+-│   ├── payloads.ts          # Payload interfaces
+-│   ├── schemas.ts           # Zod validation schemas
+-│   ├── helpers.ts           # Factory functions
+-│   ├── mocks.ts             # Fixture builders
+-│   └── helpers.test.ts
++│   ├── from-parent/        # Parent → editor (postMessage)
++│   │   ├── __tests__/
++│   │   ├── schemas.ts      # Zod + z.infer types
++│   │   ├── helpers.ts
++│   │   ├── mocks.ts
++│   │   └── index.ts
++│   └── to-parent/          # Editor → parent (postMessage)
++│       ├── __tests__/
++│       ├── schemas.ts
++│       ├── helpers.ts
++│       ├── mocks.ts
++│       └── index.ts        # also re-exports SavedMedia* from ../shared
+ ├── events/
+-│   ├── index.ts             # events barrel
+-│   ├── envelope.ts          # Envelope<T> + header-key constants
+-│   ├── export.ts            # v1 schemas for export.*
+-│   ├── mocks.ts             # Fixture envelopes
+-│   ├── export.test.ts
+-│   └── README.md            # External-team onboarding doc
+-└── shared/
+-    ├── saved-media.ts       # SavedMediaItem, SavedMediaPayload
+-    └── saved-media.test.ts
++│   ├── __tests__/
++│   ├── envelope.ts
++│   ├── export.ts
++│   ├── mocks.ts
++│   ├── README.md
++│   └── index.ts            # also re-exports SavedMedia* from ../shared
++├── shared/                 # internal-only — not in package.json exports
++│   ├── __tests__/
++│   └── saved-media.ts
++└── internal/               # ⚠ server-owner only
++    ├── upload/{schemas,index}.ts
++    ├── edit-video/{schemas,index}.ts
++    ├── render/{design-payload.schema,index}.ts
++    ├── editor-export/{types,index}.ts
++    └── shared/{overlay-type,time-range,video-metadata,index}.ts
+ ```
+ 
+ ## Commands
+@@ -160,6 +145,4 @@ pnpm format       # biome format . --write
+ 
+ ## Dependencies
+ 
+-| Package | Purpose |
+-|---|---|
+-| `zod` v4 | Runtime schema validation and type inference |
++- `zod` v4 — runtime validation. All TS types come from `z.infer<typeof schema>`.
+diff --git a/packages/contract/package.json b/packages/contract/package.json
+index 07b6348..3055a07 100644
+--- a/packages/contract/package.json
++++ b/packages/contract/package.json
+@@ -3,33 +3,21 @@
+ 	"version": "0.1.0",
+ 	"private": true,
+ 	"type": "module",
+-	"main": "./dist/index.js",
+-	"types": "./dist/index.d.ts",
+ 	"exports": {
+-		".": {
+-			"types": "./dist/index.d.ts",
+-			"import": "./dist/index.js",
+-			"default": "./dist/index.js"
+-		},
+-		"./iframe": {
+-			"types": "./dist/iframe/index.d.ts",
+-			"import": "./dist/iframe/index.js",
+-			"default": "./dist/iframe/index.js"
+-		},
+-		"./iframe/mocks": {
+-			"types": "./dist/iframe/mocks.d.ts",
+-			"import": "./dist/iframe/mocks.js",
+-			"default": "./dist/iframe/mocks.js"
++		"./iframe/*": {
++			"types": "./dist/iframe/*/index.d.ts",
++			"import": "./dist/iframe/*/index.js",
++			"default": "./dist/iframe/*/index.js"
+ 		},
+ 		"./events": {
+ 			"types": "./dist/events/index.d.ts",
+ 			"import": "./dist/events/index.js",
+ 			"default": "./dist/events/index.js"
+ 		},
+-		"./events/mocks": {
+-			"types": "./dist/events/mocks.d.ts",
+-			"import": "./dist/events/mocks.js",
+-			"default": "./dist/events/mocks.js"
++		"./internal/*": {
++			"types": "./dist/internal/*/index.d.ts",
++			"import": "./dist/internal/*/index.js",
++			"default": "./dist/internal/*/index.js"
+ 		}
+ 	},
+ 	"files": [
+diff --git a/packages/contract/src/events/export.test.ts b/packages/contract/src/events/export.test.ts
+deleted file mode 100644
+index 7be380d..0000000
+--- a/packages/contract/src/events/export.test.ts
++++ /dev/null
+@@ -1,114 +0,0 @@
+-import assert from "node:assert/strict";
+-import { describe, it } from "node:test";
+-import { EXCHANGE_NAME } from "./envelope.js";
+-import {
+-	EXPORT_COMPLETED,
+-	EXPORT_COMPLETED_V1,
+-	EXPORT_FAILED,
+-	EXPORT_FAILED_V1,
+-	EXPORT_STARTED,
+-	EXPORT_STARTED_V1,
+-	exportCompletedEnvelopeSchema,
+-	exportFailedEnvelopeSchema,
+-	exportStartedEnvelopeSchema,
+-} from "./export.js";
+-import {
+-	mockExportCompletedEnvelope,
+-	mockExportFailedEnvelope,
+-	mockExportStartedEnvelope,
+-} from "./mocks.js";
+-
+-describe("event routing keys", () => {
+-	it("uses lowercase domain.action pattern", () => {
+-		assert.equal(EXPORT_STARTED, "export.started");
+-		assert.equal(EXPORT_COMPLETED, "export.completed");
+-		assert.equal(EXPORT_FAILED, "export.failed");
+-	});
+-
+-	it("starts at version 1", () => {
+-		assert.equal(EXPORT_STARTED_V1, 1);
+-		assert.equal(EXPORT_COMPLETED_V1, 1);
+-		assert.equal(EXPORT_FAILED_V1, 1);
+-	});
+-});
+-
+-describe("exportStartedEnvelopeSchema", () => {
+-	it("accepts the v1 mock envelope", () => {
+-		assert.equal(exportStartedEnvelopeSchema.safeParse(mockExportStartedEnvelope).success, true);
+-	});
+-
+-	it("rejects an envelope missing eventVersion", () => {
+-		const { eventVersion: _v, ...rest } = mockExportStartedEnvelope;
+-		assert.equal(exportStartedEnvelopeSchema.safeParse(rest).success, false);
+-	});
+-
+-	it("rejects envelope with non-positive eventVersion", () => {
+-		assert.equal(
+-			exportStartedEnvelopeSchema.safeParse({ ...mockExportStartedEnvelope, eventVersion: 0 })
+-				.success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects envelope whose data is missing jobId", () => {
+-		const { jobId: _j, ...restData } = mockExportStartedEnvelope.data;
+-		assert.equal(
+-			exportStartedEnvelopeSchema.safeParse({ ...mockExportStartedEnvelope, data: restData })
+-				.success,
+-			false,
+-		);
+-	});
+-});
+-
+-describe("exportCompletedEnvelopeSchema", () => {
+-	it("accepts the v1 mock envelope", () => {
+-		assert.equal(
+-			exportCompletedEnvelopeSchema.safeParse(mockExportCompletedEnvelope).success,
+-			true,
+-		);
+-	});
+-
+-	it("rejects non-http url", () => {
+-		assert.equal(
+-			exportCompletedEnvelopeSchema.safeParse({
+-				...mockExportCompletedEnvelope,
+-				data: { ...mockExportCompletedEnvelope.data, url: "ftp://x/y.mp4" },
+-			}).success,
+-			false,
+-		);
+-	});
+-});
+-
+-describe("exportFailedEnvelopeSchema", () => {
+-	it("accepts the v1 mock envelope", () => {
+-		assert.equal(exportFailedEnvelopeSchema.safeParse(mockExportFailedEnvelope).success, true);
+-	});
+-
+-	it("rejects empty error string", () => {
+-		assert.equal(
+-			exportFailedEnvelopeSchema.safeParse({
+-				...mockExportFailedEnvelope,
+-				data: { ...mockExportFailedEnvelope.data, error: "" },
+-			}).success,
+-			false,
+-		);
+-	});
+-});
+-
+-describe("envelope strictness", () => {
+-	it("rejects extra top-level fields", () => {
+-		assert.equal(
+-			exportStartedEnvelopeSchema.safeParse({
+-				...mockExportStartedEnvelope,
+-				extraneous: "no",
+-			}).success,
+-			false,
+-		);
+-	});
+-});
+-
+-describe("EXCHANGE_NAME", () => {
+-	it("is the public 'video-editor' topic exchange name", () => {
+-		assert.equal(EXCHANGE_NAME, "video-editor");
+-	});
+-});
+diff --git a/packages/contract/src/events/export.ts b/packages/contract/src/events/export.ts
+index 3d3ccaa..55d392c 100644
+--- a/packages/contract/src/events/export.ts
++++ b/packages/contract/src/events/export.ts
+@@ -1,5 +1,4 @@
+ import { z } from "zod";
+-import type { SavedMediaItem } from "../shared/saved-media.js";
+ import { savedMediaItemSchema } from "../shared/saved-media.js";
+ import { type Envelope, envelopeSchema } from "./envelope.js";
+ 
+@@ -38,32 +37,14 @@ export const exportFailedDataSchema = z.strictObject({
+ 	error: nonEmptyString,
+ });
+ 
+-export type ExportStartedData = {
+-	jobId: string;
+-	mediaId: string;
+-	mediaName: string;
+-	downloadToComputer: boolean;
+-	saveToPersonalChannel: boolean;
+-	selectedUnitChannelIds: string[];
+-	exportType: "mp4" | "webp";
+-	items: SavedMediaItem[];
+-};
+-
+-export type ExportCompletedData = {
+-	jobId: string;
+-	url: string;
+-	exportType: "mp4" | "webp";
+-};
++export const exportStartedEnvelopeSchema = envelopeSchema(exportStartedDataSchema);
++export const exportCompletedEnvelopeSchema = envelopeSchema(exportCompletedDataSchema);
++export const exportFailedEnvelopeSchema = envelopeSchema(exportFailedDataSchema);
+ 
+-export type ExportFailedData = {
+-	jobId: string;
+-	error: string;
+-};
++export type ExportStartedData = z.infer<typeof exportStartedDataSchema>;
++export type ExportCompletedData = z.infer<typeof exportCompletedDataSchema>;
++export type ExportFailedData = z.infer<typeof exportFailedDataSchema>;
+ 
+ export type ExportStartedEnvelope = Envelope<ExportStartedData>;
+ export type ExportCompletedEnvelope = Envelope<ExportCompletedData>;
+ export type ExportFailedEnvelope = Envelope<ExportFailedData>;
+-
+-export const exportStartedEnvelopeSchema = envelopeSchema(exportStartedDataSchema);
+-export const exportCompletedEnvelopeSchema = envelopeSchema(exportCompletedDataSchema);
+-export const exportFailedEnvelopeSchema = envelopeSchema(exportFailedDataSchema);
+diff --git a/packages/contract/src/events/index.ts b/packages/contract/src/events/index.ts
+index 43142e7..04db395 100644
+--- a/packages/contract/src/events/index.ts
++++ b/packages/contract/src/events/index.ts
+@@ -1,3 +1,8 @@
++export type { SavedMediaItem, SavedMediaPayload } from "../shared/saved-media.js";
++export {
++	savedMediaItemSchema,
++	savedMediaPayloadSchema,
++} from "../shared/saved-media.js";
+ export type { Envelope } from "./envelope.js";
+ export {
+ 	EXCHANGE_NAME,
+diff --git a/packages/contract/src/iframe/helpers.test.ts b/packages/contract/src/iframe/helpers.test.ts
+deleted file mode 100644
+index 981d1c3..0000000
+--- a/packages/contract/src/iframe/helpers.test.ts
++++ /dev/null
+@@ -1,425 +0,0 @@
+-import assert from "node:assert/strict";
+-import { describe, it } from "node:test";
+-import {
+-	createMediaSavedMessage,
+-	createPreviewItemAddedMessage,
+-	createPreviewItemRejectedMessage,
+-	createProjectClearedMessage,
+-	isParentToEditorMessage,
+-	parseParentToEditorMessage,
+-} from "./helpers.js";
+-import {
+-	mockAudioRangeMessage,
+-	mockClearProjectMessage,
+-	mockMediaHlsMessage,
+-	mockMediaMp4Message,
+-	mockRecordingRangeHlsMessage,
+-	mockRecordingRangeNoPlaybackMessage,
+-} from "./mocks.js";
+-import { editorToParentMessageSchema, parentToEditorMessageSchema } from "./schemas.js";
+-
+-const baseRecordingPayload = {
+-	kind: "recording-range" as const,
+-	channelId: "20574",
+-	startTimeMs: 1000,
+-	endTimeMs: 2000,
+-	durationMs: 1000,
+-	playback: { kind: "hls" as const, src: "https://example.com/index.m3u8" },
+-};
+-
+-const baseAudioPayload = {
+-	kind: "audio-range" as const,
+-	audioId: "a1",
+-	startTimeMs: 1000,
+-	endTimeMs: 2000,
+-	durationMs: 1000,
+-	playback: { kind: "audio" as const, src: "https://example.com/track.m4a" },
+-};
+-
+-const MAX_MS = 1000 * 60 * 60; // 1 hour
+-
+-describe("iframe contract schemas — business rules (new refines)", () => {
+-	it("rejects unsafe (non-http/https) src in hls playback", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				...baseRecordingPayload,
+-				playback: { kind: "hls", src: "file:///etc/passwd" },
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+-	it("rejects non-http/https src in media playback", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				kind: "media",
+-				mediaId: "m-1",
+-				playback: { kind: "mp4", src: "javascript:alert(1)" },
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+-	it("rejects recording-range durationMs exceeding 1 hour", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				...baseRecordingPayload,
+-				durationMs: MAX_MS + 1,
+-				endTimeMs: baseRecordingPayload.startTimeMs + MAX_MS + 1,
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+-	it("accepts recording-range durationMs exactly at the 1-hour cap", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				...baseRecordingPayload,
+-				durationMs: MAX_MS,
+-				endTimeMs: baseRecordingPayload.startTimeMs + MAX_MS,
+-			},
+-		});
+-		assert.equal(result.success, true);
+-	});
+-
+-	it("rejects audio-range durationMs exceeding 1 hour", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				...baseAudioPayload,
+-				durationMs: MAX_MS + 1,
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+-	it("rejects media durationMs exceeding 1 hour", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				kind: "media",
+-				mediaId: "m-1",
+-				durationMs: MAX_MS + 1,
+-				playback: { kind: "mp4", src: "https://example.com/v.mp4" },
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+-	it("rejects audio-range with non-hls src that is not audio media", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				...baseAudioPayload,
+-				playback: { kind: "audio", src: "https://example.com/track.mp4" },
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+-	it("accepts audio-range with hls src that looks like video", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				...baseAudioPayload,
+-				playback: { kind: "hls", src: "https://example.com/video.m3u8" },
+-			},
+-		});
+-		assert.equal(result.success, true);
+-	});
+-});
+-
+-describe("iframe contract schemas", () => {
+-	it("parses valid add-preview-item messages", () => {
+-		assert.equal(parentToEditorMessageSchema.safeParse(mockRecordingRangeHlsMessage).success, true);
+-		assert.equal(parentToEditorMessageSchema.safeParse(mockMediaMp4Message).success, true);
+-		assert.equal(parentToEditorMessageSchema.safeParse(mockMediaHlsMessage).success, true);
+-		assert.equal(parentToEditorMessageSchema.safeParse(mockAudioRangeMessage).success, true);
+-	});
+-
+-	it("accepts recording-range without playback (editor resolves HLS URL)", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse(mockRecordingRangeNoPlaybackMessage).success,
+-			true,
+-		);
+-	});
+-
+-	it("parses valid clear-project messages", () => {
+-		assert.equal(parentToEditorMessageSchema.safeParse(mockClearProjectMessage).success, true);
+-	});
+-
+-	it("rejects invalid message shapes", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				requestId: "bad",
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects durationMs = 0 for recording-range", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: { ...baseRecordingPayload, durationMs: 0 },
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects durationMs = 0 for audio-range", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: { ...baseAudioPayload, durationMs: 0 },
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects endTimeMs < startTimeMs for recording-range", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: { ...baseRecordingPayload, startTimeMs: 100, endTimeMs: 99 },
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects endTimeMs === startTimeMs (zero duration range) for recording-range", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: { ...baseRecordingPayload, startTimeMs: 100, endTimeMs: 100 },
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects endTimeMs === startTimeMs for audio-range", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: { ...baseAudioPayload, startTimeMs: 100, endTimeMs: 100 },
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("accepts sourceOffsetMs = 0 (valid boundary)", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: { ...baseRecordingPayload, sourceOffsetMs: 0 },
+-			}).success,
+-			true,
+-		);
+-	});
+-
+-	it("rejects sourceOffsetMs > durationMs", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: {
+-					...baseRecordingPayload,
+-					durationMs: 1000,
+-					sourceOffsetMs: 1001,
+-				},
+-			}).success,
+-			false,
+-		);
+-	});
+-});
+-
+-describe("editorMediaSavedMessageSchema", () => {
+-	const validMsg = {
+-		type: "EDITOR_MEDIA_SAVED",
+-		mediaId: "550e8400-e29b-41d4-a716-446655440000",
+-		mediaName: "My Clip",
+-		downloadToComputer: true,
+-		saveToPersonalChannel: false,
+-		selectedUnitChannelIds: [],
+-		url: "https://example.com/output/video.mp4",
+-		exportType: "mp4",
+-		items: [
+-			{ type: "recording", id: "ch-1", from: 0, to: 5000 },
+-			{ type: "audio", id: "aud-1", from: 1000, to: 4000 },
+-			{ type: "image", id: "img-1" },
+-			{ type: "clip", id: "media-1" },
+-		],
+-	};
+-
+-	it("accepts a valid EDITOR_MEDIA_SAVED message", () => {
+-		assert.equal(editorToParentMessageSchema.safeParse(validMsg).success, true);
+-	});
+-
+-	it("rejects missing mediaName", () => {
+-		const { mediaName: _m, ...rest } = validMsg;
+-		assert.equal(editorToParentMessageSchema.safeParse(rest).success, false);
+-	});
+-
+-	it("rejects non-http url", () => {
+-		assert.equal(
+-			editorToParentMessageSchema.safeParse({ ...validMsg, url: "ftp://bad.com/x.mp4" }).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects unknown exportType", () => {
+-		assert.equal(
+-			editorToParentMessageSchema.safeParse({ ...validMsg, exportType: "json" }).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects recording item missing from/to", () => {
+-		assert.equal(
+-			editorToParentMessageSchema.safeParse({
+-				...validMsg,
+-				items: [{ type: "recording", id: "ch-1" }],
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("accepts empty items array", () => {
+-		assert.equal(editorToParentMessageSchema.safeParse({ ...validMsg, items: [] }).success, true);
+-	});
+-
+-	it("rejects EDITOR_MEDIA_SAVED without mediaId", () => {
+-		const { mediaId: _m, ...withoutMediaId } = validMsg as typeof validMsg & { mediaId: string };
+-		assert.equal(editorToParentMessageSchema.safeParse(withoutMediaId).success, false);
+-	});
+-
+-	it("rejects EDITOR_MEDIA_SAVED without selectedUnitChannelIds", () => {
+-		const { selectedUnitChannelIds: _s, ...withoutChannels } = validMsg as typeof validMsg & {
+-			selectedUnitChannelIds: string[];
+-		};
+-		assert.equal(editorToParentMessageSchema.safeParse(withoutChannels).success, false);
+-	});
+-
+-	it("accepts EDITOR_MEDIA_SAVED with mediaId and selectedUnitChannelIds", () => {
+-		assert.equal(
+-			editorToParentMessageSchema.safeParse({
+-				...validMsg,
+-				mediaId: "550e8400-e29b-41d4-a716-446655440000",
+-				selectedUnitChannelIds: ["ch-1", "ch-2"],
+-			}).success,
+-			true,
+-		);
+-	});
+-
+-	it("accepts EDITOR_MEDIA_SAVED with empty selectedUnitChannelIds", () => {
+-		assert.equal(
+-			editorToParentMessageSchema.safeParse({
+-				...validMsg,
+-				mediaId: "550e8400-e29b-41d4-a716-446655440000",
+-				selectedUnitChannelIds: [],
+-			}).success,
+-			true,
+-		);
+-	});
+-});
+-
+-describe("iframe contract helpers", () => {
+-	it("detects valid parent-to-editor messages", () => {
+-		assert.equal(isParentToEditorMessage(mockMediaMp4Message), true);
+-		assert.equal(isParentToEditorMessage({ type: "UNKNOWN" }), false);
+-	});
+-
+-	it("parses valid parent-to-editor messages", () => {
+-		const parsed = parseParentToEditorMessage(mockMediaHlsMessage);
+-		assert.equal(parsed.type, "EDITOR_ADD_PREVIEW_ITEM");
+-		if (parsed.type !== "EDITOR_ADD_PREVIEW_ITEM") {
+-			assert.fail("Expected an add-preview-item message");
+-		}
+-		assert.equal(parsed.payload.kind, "media");
+-	});
+-
+-	it("creates response messages with the expected shapes", () => {
+-		assert.deepEqual(createPreviewItemAddedMessage("item-1", "req-1"), {
+-			type: "EDITOR_PREVIEW_ITEM_ADDED",
+-			requestId: "req-1",
+-			itemId: "item-1",
+-		});
+-		assert.deepEqual(createPreviewItemRejectedMessage("bad request", "req-2"), {
+-			type: "EDITOR_PREVIEW_ITEM_REJECTED",
+-			requestId: "req-2",
+-			reason: "bad request",
+-		});
+-		assert.deepEqual(createProjectClearedMessage("req-3"), {
+-			type: "EDITOR_PROJECT_CLEARED",
+-			requestId: "req-3",
+-		});
+-	});
+-
+-	it("keeps all exported mocks schema-valid", () => {
+-		for (const message of [
+-			mockRecordingRangeHlsMessage,
+-			mockRecordingRangeNoPlaybackMessage,
+-			mockMediaMp4Message,
+-			mockMediaHlsMessage,
+-			mockAudioRangeMessage,
+-			mockClearProjectMessage,
+-		]) {
+-			assert.equal(
+-				parentToEditorMessageSchema.safeParse(message).success,
+-				true,
+-				`Mock failed schema validation: ${JSON.stringify(message)}`,
+-			);
+-		}
+-	});
+-});
+-
+-describe("EDITOR_SET_AUTH", () => {
+-	it("accepts a non-empty token", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({ type: "EDITOR_SET_AUTH", token: "abc.123" }).success,
+-			true,
+-		);
+-	});
+-
+-	it("rejects an empty token", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({ type: "EDITOR_SET_AUTH", token: "" }).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects when token is missing", () => {
+-		assert.equal(parentToEditorMessageSchema.safeParse({ type: "EDITOR_SET_AUTH" }).success, false);
+-	});
+-});
+-
+-describe("createMediaSavedMessage", () => {
+-	it("returns expected shape with each arg at its named key", () => {
+-		const items = [{ type: "clip" as const, id: "media-1" }];
+-		const msg = createMediaSavedMessage(
+-			"My Clip",
+-			true,
+-			false,
+-			"https://example.com/output/video.mp4",
+-			"mp4",
+-			items,
+-			"550e8400-e29b-41d4-a716-446655440000",
+-			["ch-1"],
+-		);
+-		assert.deepEqual(msg, {
+-			type: "EDITOR_MEDIA_SAVED",
+-			mediaId: "550e8400-e29b-41d4-a716-446655440000",
+-			mediaName: "My Clip",
+-			downloadToComputer: true,
+-			saveToPersonalChannel: false,
+-			selectedUnitChannelIds: ["ch-1"],
+-			url: "https://example.com/output/video.mp4",
+-			exportType: "mp4",
+-			items,
+-		});
+-	});
+-});
+diff --git a/packages/contract/src/iframe/helpers.ts b/packages/contract/src/iframe/helpers.ts
+deleted file mode 100644
+index 294c180..0000000
+--- a/packages/contract/src/iframe/helpers.ts
++++ /dev/null
+@@ -1,60 +0,0 @@
+-import type {
+-	EditorMediaSavedMessage,
+-	EditorPreviewItemAddedMessage,
+-	EditorPreviewItemRejectedMessage,
+-	EditorProjectClearedMessage,
+-	ParentToEditorMessage,
+-	SavedMediaItem,
+-} from "./messages.js";
+-
+-import { parentToEditorMessageSchema } from "./schemas.js";
+-
+-export const isParentToEditorMessage = (value: unknown): value is ParentToEditorMessage =>
+-	parentToEditorMessageSchema.safeParse(value).success;
+-
+-export const parseParentToEditorMessage = (value: unknown): ParentToEditorMessage =>
+-	parentToEditorMessageSchema.parse(value);
+-
+-export const createPreviewItemAddedMessage = (
+-	itemId: string,
+-	requestId?: string,
+-): EditorPreviewItemAddedMessage => ({
+-	type: "EDITOR_PREVIEW_ITEM_ADDED",
+-	requestId,
+-	itemId,
+-});
+-
+-export const createPreviewItemRejectedMessage = (
+-	reason: string,
+-	requestId?: string,
+-): EditorPreviewItemRejectedMessage => ({
+-	type: "EDITOR_PREVIEW_ITEM_REJECTED",
+-	requestId,
+-	reason,
+-});
+-
+-export const createProjectClearedMessage = (requestId?: string): EditorProjectClearedMessage => ({
+-	type: "EDITOR_PROJECT_CLEARED",
+-	requestId,
+-});
+-
+-export const createMediaSavedMessage = (
+-	mediaName: string,
+-	downloadToComputer: boolean,
+-	saveToPersonalChannel: boolean,
+-	url: string,
+-	exportType: "mp4" | "webp",
+-	items: SavedMediaItem[],
+-	mediaId: string,
+-	selectedUnitChannelIds: string[],
+-): EditorMediaSavedMessage => ({
+-	type: "EDITOR_MEDIA_SAVED",
+-	mediaId,
+-	mediaName,
+-	downloadToComputer,
+-	saveToPersonalChannel,
+-	selectedUnitChannelIds,
+-	url,
+-	exportType,
+-	items,
+-});
+diff --git a/packages/contract/src/iframe/index.ts b/packages/contract/src/iframe/index.ts
+deleted file mode 100644
+index 5798326..0000000
+--- a/packages/contract/src/iframe/index.ts
++++ /dev/null
+@@ -1,56 +0,0 @@
+-export {
+-	createMediaSavedMessage,
+-	createPreviewItemAddedMessage,
+-	createPreviewItemRejectedMessage,
+-	createProjectClearedMessage,
+-	isParentToEditorMessage,
+-	parseParentToEditorMessage,
+-} from "./helpers.js";
+-export type {
+-	EditorAddPreviewItemMessage,
+-	EditorClearProjectMessage,
+-	EditorMediaSavedMessage,
+-	EditorPreviewItemAddedMessage,
+-	EditorPreviewItemRejectedMessage,
+-	EditorProjectClearedMessage,
+-	EditorReadyMessage,
+-	EditorSetAuthMessage,
+-	EditorToParentMessage,
+-	ParentToEditorMessage,
+-	SavedMediaItem,
+-	SavedMediaPayload,
+-} from "./messages.js";
+-export type {
+-	AudioPlayback,
+-	AudioRangePayload,
+-	HlsPlayback,
+-	MediaPayload,
+-	MediaPlayback,
+-	Playback,
+-	PreviewItemPayload,
+-	RecordingRangePayload,
+-} from "./payloads.js";
+-export {
+-	DEMO_PREVIEW_CHANNEL_ID,
+-	DEMO_PREVIEW_DEFAULT_END_MS,
+-	DEMO_PREVIEW_SEGMENT_START_MS,
+-} from "./payloads.js";
+-export {
+-	audioPlaybackSchema,
+-	audioRangePayloadSchema,
+-	editorAddPreviewItemMessageSchema,
+-	editorClearProjectMessageSchema,
+-	editorMediaSavedMessageSchema,
+-	editorPreviewItemAddedMessageSchema,
+-	editorPreviewItemRejectedMessageSchema,
+-	editorProjectClearedMessageSchema,
+-	editorSetAuthMessageSchema,
+-	editorToParentMessageSchema,
+-	hlsPlaybackSchema,
+-	MAX_PREVIEW_DURATION_MS,
+-	mediaPayloadSchema,
+-	mediaPlaybackSchema,
+-	parentToEditorMessageSchema,
+-	previewItemPayloadSchema,
+-	recordingRangePayloadSchema,
+-} from "./schemas.js";
+diff --git a/packages/contract/src/iframe/messages.ts b/packages/contract/src/iframe/messages.ts
+deleted file mode 100644
+index 67d5a3a..0000000
+--- a/packages/contract/src/iframe/messages.ts
++++ /dev/null
+@@ -1,58 +0,0 @@
+-import type { SavedMediaPayload } from "../shared/saved-media.js";
+-import type { PreviewItemPayload } from "./payloads.js";
+-
+-export type { SavedMediaItem, SavedMediaPayload } from "../shared/saved-media.js";
+-
+-export type EditorAddPreviewItemMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM";
+-	requestId?: string;
+-	payload: PreviewItemPayload;
+-};
+-
+-export type EditorClearProjectMessage = {
+-	type: "EDITOR_CLEAR_PROJECT";
+-	requestId?: string;
+-};
+-
+-export type EditorSetAuthMessage = {
+-	type: "EDITOR_SET_AUTH";
+-	token: string;
+-};
+-
+-export type ParentToEditorMessage =
+-	| EditorAddPreviewItemMessage
+-	| EditorClearProjectMessage
+-	| EditorSetAuthMessage;
+-
+-export type EditorPreviewItemAddedMessage = {
+-	type: "EDITOR_PREVIEW_ITEM_ADDED";
+-	requestId?: string;
+-	itemId: string;
+-};
+-
+-export type EditorPreviewItemRejectedMessage = {
+-	type: "EDITOR_PREVIEW_ITEM_REJECTED";
+-	requestId?: string;
+-	reason: string;
+-};
+-
+-export type EditorProjectClearedMessage = {
+-	type: "EDITOR_PROJECT_CLEARED";
+-	requestId?: string;
+-};
+-
+-export type EditorReadyMessage = {
+-	type: "EDITOR_READY";
+-};
+-
+-export type EditorMediaSavedMessage = SavedMediaPayload & {
+-	type: "EDITOR_MEDIA_SAVED";
+-	url: string;
+-};
+-
+-export type EditorToParentMessage =
+-	| EditorPreviewItemAddedMessage
+-	| EditorPreviewItemRejectedMessage
+-	| EditorProjectClearedMessage
+-	| EditorReadyMessage
+-	| EditorMediaSavedMessage;
+diff --git a/packages/contract/src/iframe/mocks.ts b/packages/contract/src/iframe/mocks.ts
+deleted file mode 100644
+index c7a7da5..0000000
+--- a/packages/contract/src/iframe/mocks.ts
++++ /dev/null
+@@ -1,109 +0,0 @@
+-import type {
+-	EditorClearProjectMessage,
+-	EditorMediaSavedMessage,
+-	ParentToEditorMessage,
+-} from "./messages.js";
+-
+-const mockStartTimeMs = 1778412276333;
+-const mockEndTimeMs = 1778412813617;
+-const mockDurationMs = mockEndTimeMs - mockStartTimeMs;
+-
+-export const mockRecordingRangeHlsMessage: ParentToEditorMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM",
+-	requestId: "mock-recording-range-hls",
+-	payload: {
+-		kind: "recording-range",
+-		channelId: "20574",
+-		startTimeMs: mockStartTimeMs,
+-		endTimeMs: mockEndTimeMs,
+-		durationMs: mockDurationMs,
+-		playback: {
+-			kind: "hls",
+-			src: "https://example.com/api/editor/hls-preview/jobs/mock-recording/index.m3u8",
+-		},
+-		sourceOffsetMs: 6333,
+-		posterSrc: "https://example.com/mock-recording-poster.jpg",
+-	},
+-};
+-
+-export const mockMediaMp4Message: ParentToEditorMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM",
+-	requestId: "mock-media-mp4",
+-	payload: {
+-		kind: "media",
+-		mediaId: "media-1001",
+-		durationMs: 120000,
+-		playback: {
+-			kind: "mp4",
+-			src: "https://example.com/media/mock-video.mp4",
+-		},
+-		posterSrc: "https://example.com/media/mock-video-poster.jpg",
+-	},
+-};
+-
+-export const mockMediaHlsMessage: ParentToEditorMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM",
+-	requestId: "mock-media-hls",
+-	payload: {
+-		kind: "media",
+-		mediaId: "media-1002",
+-		durationMs: 180000,
+-		playback: {
+-			kind: "hls",
+-			src: "https://example.com/media/mock-video/index.m3u8",
+-		},
+-		posterSrc: "https://example.com/media/mock-video-hls-poster.jpg",
+-	},
+-};
+-
+-export const mockAudioRangeMessage: ParentToEditorMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM",
+-	requestId: "mock-audio-range",
+-	payload: {
+-		kind: "audio-range",
+-		audioId: "audio-501",
+-		startTimeMs: mockStartTimeMs,
+-		endTimeMs: mockEndTimeMs,
+-		durationMs: mockDurationMs,
+-		playback: {
+-			kind: "audio",
+-			src: "https://example.com/audio/mock-track.m4a",
+-		},
+-		sourceOffsetMs: 6333,
+-	},
+-};
+-
+-export const mockRecordingRangeNoPlaybackMessage: ParentToEditorMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM",
+-	requestId: "mock-recording-range-no-playback",
+-	payload: {
+-		kind: "recording-range",
+-		channelId: "20574",
+-		startTimeMs: mockStartTimeMs,
+-		endTimeMs: mockEndTimeMs,
+-		durationMs: mockDurationMs,
+-		sourceOffsetMs: 6333,
+-	},
+-};
+-
+-export const mockClearProjectMessage: EditorClearProjectMessage = {
+-	type: "EDITOR_CLEAR_PROJECT",
+-	requestId: "mock-clear-project",
+-};
+-
+-export const mockMediaSavedMessage: EditorMediaSavedMessage = {
+-	type: "EDITOR_MEDIA_SAVED",
+-	mediaId: "550e8400-e29b-41d4-a716-446655440000",
+-	mediaName: "My Edited Clip",
+-	downloadToComputer: true,
+-	saveToPersonalChannel: false,
+-	selectedUnitChannelIds: [],
+-	url: "https://example.com/output/mock-video.mp4",
+-	exportType: "mp4",
+-	items: [
+-		{ type: "recording", id: "20574", from: 0, to: 537284 },
+-		{ type: "audio", id: "audio-501", from: 0, to: 537284 },
+-		{ type: "image", id: "img-item-1" },
+-		{ type: "clip", id: "media-1001" },
+-	],
+-};
+diff --git a/packages/contract/src/iframe/payloads.ts b/packages/contract/src/iframe/payloads.ts
+deleted file mode 100644
+index 5552346..0000000
+--- a/packages/contract/src/iframe/payloads.ts
++++ /dev/null
+@@ -1,55 +0,0 @@
+-export type HlsPlayback = {
+-	kind: "hls";
+-	src: string;
+-};
+-
+-export type MediaPlayback = {
+-	kind: "mp4" | "hls";
+-	src: string;
+-};
+-
+-export type AudioPlayback = {
+-	kind: "audio" | "hls";
+-	src: string;
+-};
+-
+-export type Playback = HlsPlayback | MediaPlayback | AudioPlayback;
+-
+-export const DEMO_PREVIEW_CHANNEL_ID = "demo-recording";
+-export const DEMO_PREVIEW_SEGMENT_START_MS = 1778412270000;
+-export const DEMO_PREVIEW_DEFAULT_END_MS = DEMO_PREVIEW_SEGMENT_START_MS + 30000;
+-
+-export type RecordingRangePayload = {
+-	kind: "recording-range";
+-	channelId: string;
+-	startTimeMs: number;
+-	endTimeMs: number;
+-	durationMs: number;
+-	/** When absent, the editor resolves the HLS playlist URL via POST /api/editor/preview-source. */
+-	playback?: HlsPlayback;
+-	sourceOffsetMs?: number;
+-	posterSrc?: string;
+-	name?: string;
+-};
+-
+-export type MediaPayload = {
+-	kind: "media";
+-	mediaId: string;
+-	durationMs?: number;
+-	playback: MediaPlayback;
+-	posterSrc?: string;
+-	name?: string;
+-};
+-
+-export type AudioRangePayload = {
+-	kind: "audio-range";
+-	audioId: string;
+-	startTimeMs?: number;
+-	endTimeMs?: number;
+-	durationMs: number;
+-	playback: AudioPlayback;
+-	sourceOffsetMs?: number;
+-	name?: string;
+-};
+-
+-export type PreviewItemPayload = RecordingRangePayload | MediaPayload | AudioRangePayload;
+diff --git a/packages/contract/src/iframe/schemas.ts b/packages/contract/src/iframe/schemas.ts
+deleted file mode 100644
+index 08cf54d..0000000
+--- a/packages/contract/src/iframe/schemas.ts
++++ /dev/null
+@@ -1,181 +0,0 @@
+-import { z } from "zod";
+-import { savedMediaPayloadSchema } from "../shared/saved-media.js";
+-
+-export const MAX_PREVIEW_DURATION_MS = 1000 * 60 * 60 * 1;
+-
+-const positiveNumber = z.number().finite().min(0);
+-const positiveDuration = z.number().finite().positive();
+-const nonEmptyString = z.string().trim().min(1);
+-const requestIdSchema = z.string().trim().min(1).optional();
+-
+-const safeMediaUrl = (src: string) => /^https?:\/\//i.test(src);
+-const likelyAudioSrc = (src: string) => /\.(m3u8|mp3|wav|m4a|aac|ogg)(\?|$)/i.test(src);
+-const safeSrc = nonEmptyString.refine(safeMediaUrl, {
+-	message: "src must be an http/https URL",
+-});
+-
+-export const hlsPlaybackSchema = z.strictObject({
+-	kind: z.literal("hls"),
+-	src: safeSrc,
+-});
+-
+-export const mediaPlaybackSchema = z.strictObject({
+-	kind: z.union([z.literal("mp4"), z.literal("hls")]),
+-	src: safeSrc,
+-});
+-
+-export const audioPlaybackSchema = z.strictObject({
+-	kind: z.union([z.literal("audio"), z.literal("hls")]),
+-	src: safeSrc,
+-});
+-
+-export const recordingRangePayloadSchema = z
+-	.strictObject({
+-		kind: z.literal("recording-range"),
+-		channelId: nonEmptyString,
+-		startTimeMs: positiveNumber,
+-		endTimeMs: positiveNumber,
+-		durationMs: positiveDuration,
+-		playback: hlsPlaybackSchema.optional(),
+-		sourceOffsetMs: positiveNumber.optional(),
+-		posterSrc: nonEmptyString.optional(),
+-		name: z.string().optional(),
+-	})
+-	.superRefine((value, ctx) => {
+-		if (value.endTimeMs <= value.startTimeMs) {
+-			ctx.addIssue({
+-				code: z.ZodIssueCode.custom,
+-				message: "endTimeMs must be greater than startTimeMs",
+-				path: ["endTimeMs"],
+-			});
+-		}
+-
+-		if (value.sourceOffsetMs !== undefined && value.sourceOffsetMs > value.durationMs) {
+-			ctx.addIssue({
+-				code: z.ZodIssueCode.custom,
+-				message: "sourceOffsetMs must be less than or equal to durationMs",
+-				path: ["sourceOffsetMs"],
+-			});
+-		}
+-	})
+-	.refine((p) => p.durationMs <= MAX_PREVIEW_DURATION_MS, {
+-		message: "durationMs exceeds the maximum supported preview duration",
+-		path: ["durationMs"],
+-	});
+-
+-export const mediaPayloadSchema = z
+-	.strictObject({
+-		kind: z.literal("media"),
+-		mediaId: nonEmptyString,
+-		durationMs: positiveNumber.optional(),
+-		playback: mediaPlaybackSchema,
+-		posterSrc: nonEmptyString.optional(),
+-		name: z.string().optional(),
+-	})
+-	.refine((p) => (p.durationMs ?? 0) <= MAX_PREVIEW_DURATION_MS, {
+-		message: "durationMs exceeds the maximum supported preview duration",
+-		path: ["durationMs"],
+-	});
+-
+-export const audioRangePayloadSchema = z
+-	.strictObject({
+-		kind: z.literal("audio-range"),
+-		audioId: nonEmptyString,
+-		startTimeMs: positiveNumber.optional(),
+-		endTimeMs: positiveNumber.optional(),
+-		durationMs: positiveDuration,
+-		playback: audioPlaybackSchema,
+-		sourceOffsetMs: positiveNumber.optional(),
+-		name: z.string().optional(),
+-	})
+-	.superRefine((value, ctx) => {
+-		if (
+-			value.startTimeMs !== undefined &&
+-			value.endTimeMs !== undefined &&
+-			value.endTimeMs <= value.startTimeMs
+-		) {
+-			ctx.addIssue({
+-				code: z.ZodIssueCode.custom,
+-				message: "endTimeMs must be greater than startTimeMs",
+-				path: ["endTimeMs"],
+-			});
+-		}
+-
+-		if (value.sourceOffsetMs !== undefined && value.sourceOffsetMs > value.durationMs) {
+-			ctx.addIssue({
+-				code: z.ZodIssueCode.custom,
+-				message: "sourceOffsetMs must be less than or equal to durationMs",
+-				path: ["sourceOffsetMs"],
+-			});
+-		}
+-
+-		if (value.playback.kind !== "hls" && !likelyAudioSrc(value.playback.src)) {
+-			ctx.addIssue({
+-				code: z.ZodIssueCode.custom,
+-				message: "audio-range src must point to audio or HLS media",
+-				path: ["playback", "src"],
+-			});
+-		}
+-	})
+-	.refine((p) => p.durationMs <= MAX_PREVIEW_DURATION_MS, {
+-		message: "durationMs exceeds the maximum supported preview duration",
+-		path: ["durationMs"],
+-	});
+-
+-export const previewItemPayloadSchema = z.union([
+-	recordingRangePayloadSchema,
+-	mediaPayloadSchema,
+-	audioRangePayloadSchema,
+-]);
+-
+-export const editorAddPreviewItemMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_ADD_PREVIEW_ITEM"),
+-	requestId: requestIdSchema,
+-	payload: previewItemPayloadSchema,
+-});
+-
+-export const editorClearProjectMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_CLEAR_PROJECT"),
+-	requestId: requestIdSchema,
+-});
+-
+-export const editorSetAuthMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_SET_AUTH"),
+-	token: nonEmptyString,
+-});
+-
+-export const parentToEditorMessageSchema = z.union([
+-	editorAddPreviewItemMessageSchema,
+-	editorClearProjectMessageSchema,
+-	editorSetAuthMessageSchema,
+-]);
+-
+-export const editorPreviewItemAddedMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_PREVIEW_ITEM_ADDED"),
+-	requestId: requestIdSchema,
+-	itemId: nonEmptyString,
+-});
+-
+-export const editorPreviewItemRejectedMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_PREVIEW_ITEM_REJECTED"),
+-	requestId: requestIdSchema,
+-	reason: nonEmptyString,
+-});
+-
+-export const editorProjectClearedMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_PROJECT_CLEARED"),
+-	requestId: requestIdSchema,
+-});
+-
+-export const editorMediaSavedMessageSchema = z.strictObject({
+-	...savedMediaPayloadSchema.shape,
+-	type: z.literal("EDITOR_MEDIA_SAVED"),
+-	url: safeSrc,
+-});
+-
+-export const editorToParentMessageSchema = z.union([
+-	editorPreviewItemAddedMessageSchema,
+-	editorPreviewItemRejectedMessageSchema,
+-	editorProjectClearedMessageSchema,
+-	editorMediaSavedMessageSchema,
+-]);
+diff --git a/packages/contract/src/index.ts b/packages/contract/src/index.ts
+deleted file mode 100644
+index 99ac2f2..0000000
+--- a/packages/contract/src/index.ts
++++ /dev/null
+@@ -1,53 +0,0 @@
+-export type {
+-	AudioPlayback,
+-	AudioRangePayload,
+-	EditorAddPreviewItemMessage,
+-	EditorClearProjectMessage,
+-	EditorMediaSavedMessage,
+-	EditorPreviewItemAddedMessage,
+-	EditorPreviewItemRejectedMessage,
+-	EditorProjectClearedMessage,
+-	EditorReadyMessage,
+-	EditorSetAuthMessage,
+-	EditorToParentMessage,
+-	HlsPlayback,
+-	MediaPayload,
+-	MediaPlayback,
+-	ParentToEditorMessage,
+-	Playback,
+-	PreviewItemPayload,
+-	RecordingRangePayload,
+-} from "./iframe/index.js";
+-export {
+-	audioPlaybackSchema,
+-	audioRangePayloadSchema,
+-	createMediaSavedMessage,
+-	createPreviewItemAddedMessage,
+-	createPreviewItemRejectedMessage,
+-	createProjectClearedMessage,
+-	DEMO_PREVIEW_CHANNEL_ID,
+-	DEMO_PREVIEW_DEFAULT_END_MS,
+-	DEMO_PREVIEW_SEGMENT_START_MS,
+-	editorAddPreviewItemMessageSchema,
+-	editorClearProjectMessageSchema,
+-	editorMediaSavedMessageSchema,
+-	editorPreviewItemAddedMessageSchema,
+-	editorPreviewItemRejectedMessageSchema,
+-	editorProjectClearedMessageSchema,
+-	editorSetAuthMessageSchema,
+-	editorToParentMessageSchema,
+-	hlsPlaybackSchema,
+-	isParentToEditorMessage,
+-	MAX_PREVIEW_DURATION_MS,
+-	mediaPayloadSchema,
+-	mediaPlaybackSchema,
+-	parentToEditorMessageSchema,
+-	parseParentToEditorMessage,
+-	previewItemPayloadSchema,
+-	recordingRangePayloadSchema,
+-} from "./iframe/index.js";
+-export type { SavedMediaItem, SavedMediaPayload } from "./shared/saved-media.js";
+-export {
+-	savedMediaItemSchema,
+-	savedMediaPayloadSchema,
+-} from "./shared/saved-media.js";
+diff --git a/packages/contract/src/shared/saved-media.test.ts b/packages/contract/src/shared/saved-media.test.ts
+deleted file mode 100644
+index ca783c7..0000000
+--- a/packages/contract/src/shared/saved-media.test.ts
++++ /dev/null
+@@ -1,63 +0,0 @@
+-import assert from "node:assert/strict";
+-import { describe, it } from "node:test";
+-import { savedMediaItemSchema, savedMediaPayloadSchema } from "./saved-media.js";
+-
+-describe("savedMediaItemSchema", () => {
+-	it("accepts image item", () => {
+-		assert.equal(savedMediaItemSchema.safeParse({ type: "image", id: "img-1" }).success, true);
+-	});
+-
+-	it("accepts clip item", () => {
+-		assert.equal(savedMediaItemSchema.safeParse({ type: "clip", id: "clip-1" }).success, true);
+-	});
+-
+-	it("accepts recording with from/to", () => {
+-		assert.equal(
+-			savedMediaItemSchema.safeParse({ type: "recording", id: "ch-1", from: 0, to: 100 }).success,
+-			true,
+-		);
+-	});
+-
+-	it("accepts audio with from/to", () => {
+-		assert.equal(
+-			savedMediaItemSchema.safeParse({ type: "audio", id: "aud-1", from: 0, to: 100 }).success,
+-			true,
+-		);
+-	});
+-
+-	it("rejects recording missing from/to", () => {
+-		assert.equal(savedMediaItemSchema.safeParse({ type: "recording", id: "ch-1" }).success, false);
+-	});
+-
+-	it("rejects unknown type", () => {
+-		assert.equal(savedMediaItemSchema.safeParse({ type: "foo", id: "x" }).success, false);
+-	});
+-});
+-
+-describe("savedMediaPayloadSchema", () => {
+-	const valid = {
+-		mediaId: "550e8400-e29b-41d4-a716-446655440000",
+-		mediaName: "Clip A",
+-		downloadToComputer: true,
+-		saveToPersonalChannel: false,
+-		selectedUnitChannelIds: [],
+-		exportType: "mp4",
+-		items: [{ type: "image", id: "img-1" }],
+-	};
+-
+-	it("accepts a valid payload", () => {
+-		assert.equal(savedMediaPayloadSchema.safeParse(valid).success, true);
+-	});
+-
+-	it("rejects missing mediaName", () => {
+-		const { mediaName: _m, ...rest } = valid;
+-		assert.equal(savedMediaPayloadSchema.safeParse(rest).success, false);
+-	});
+-
+-	it("rejects unknown exportType", () => {
+-		assert.equal(
+-			savedMediaPayloadSchema.safeParse({ ...valid, exportType: "json" }).success,
+-			false,
+-		);
+-	});
+-});
+diff --git a/packages/contract/src/shared/saved-media.ts b/packages/contract/src/shared/saved-media.ts
+index 2ad1cf6..7f6a139 100644
+--- a/packages/contract/src/shared/saved-media.ts
++++ b/packages/contract/src/shared/saved-media.ts
+@@ -1,21 +1,5 @@
+ import { z } from "zod";
+ 
+-export type SavedMediaItem =
+-	| { type: "image"; id: string }
+-	| { type: "clip"; id: string }
+-	| { type: "recording"; id: string; from: number; to: number }
+-	| { type: "audio"; id: string; from: number; to: number };
+-
+-export type SavedMediaPayload = {
+-	mediaId: string;
+-	mediaName: string;
+-	downloadToComputer: boolean;
+-	saveToPersonalChannel: boolean;
+-	selectedUnitChannelIds: string[];
+-	exportType: "mp4" | "webp";
+-	items: SavedMediaItem[];
+-};
+-
+ const nonEmptyString = z.string().trim().min(1);
+ const positiveNumber = z.number().finite().min(0);
+ 
+@@ -45,3 +29,6 @@ export const savedMediaPayloadSchema = z.strictObject({
+ 	exportType: z.union([z.literal("mp4"), z.literal("webp")]),
+ 	items: z.array(savedMediaItemSchema),
+ });
++
++export type SavedMediaItem = z.infer<typeof savedMediaItemSchema>;
++export type SavedMediaPayload = z.infer<typeof savedMediaPayloadSchema>;

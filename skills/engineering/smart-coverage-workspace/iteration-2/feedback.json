@@ -1,0 +1,65 @@
+{
+  "reviews": [
+    {
+      "run_id": "eval-1-with_skill",
+      "feedback": "Strong. Hits prompt criteria: describe/it + When-Then naming (5 each), no Go/Angular/Flutter syntax leak, identifies Critical 'no test file' gap. Structured report with Phase 0 detection, Classification table, Exit Doors, Already Covered + Skipped sections, Remediation plan. The amount=0 Low gap is a good falsy-edge call. Caveat: 'Gap 2 state verification' uses a paymentRepository that the source likely doesn't expose \u2014 black-box overreach without verified wiring.",
+      "timestamp": "2026-05-29T17:37:10.685Z"
+    },
+    {
+      "run_id": "eval-1-without_skill",
+      "feedback": "Decent TS test code with describe/it and nested 'When .../Then ...' naming via nested describe blocks. Misses the skill's structured format: no Phase 0 detection JSON, no Classification table, no Exit Door taxonomy, no Already Covered/Skipped/Remediation sections. Output is ~47% larger (5793 vs 3922) without commensurate signal. The 'negative amount documents current behavior' framing is a nice touch.",
+      "timestamp": "2026-05-29T17:37:10.685Z"
+    },
+    {
+      "run_id": "eval-2-with_skill",
+      "feedback": "Hits all three criteria cleanly: TestBed for the Angular component (5 refs), describe/it for the controller, no syntax mixing across files. Classification table separates the two file types correctly. Remediation plan and Skipped sections present. Solid polyglot handling.",
+      "timestamp": "2026-05-29T17:37:10.685Z"
+    },
+    {
+      "run_id": "eval-2-without_skill",
+      "feedback": "Both syntaxes present and unmixed (TestBed x2 + describe/it x9 + When/Then x9 naming). Less structured than with_skill \u2014 no phase headers, no Skipped/Already Covered sections, no remediation plan. Prioritization rationale is light.",
+      "timestamp": "2026-05-29T17:37:10.685Z"
+    },
+    {
+      "run_id": "eval-3-with_skill",
+      "feedback": "func Test* syntax (3 functions), go.sum correctly listed as Skipped, no TS leak. Classification table, Phase 0 detection JSON, AAA comment markers, Critical+High gaps, Remediation plan. Clean Go-only output.",
+      "timestamp": "2026-05-29T17:37:10.685Z"
+    },
+    {
+      "run_id": "eval-3-without_skill",
+      "feedback": "func Test* syntax (4 functions), go.sum noted as skipped, no TS leak. Decent baseline \u2014 fewer structural sections than with_skill but still hits all three prompt criteria.",
+      "timestamp": "2026-05-29T17:37:10.685Z"
+    },
+    {
+      "run_id": "eval-4-with_skill",
+      "feedback": "Two clean language sections (## TypeScript / ## Go) with no syntax bleeding. TS uses describe/it/When-Then; Go uses func Test*_When*_Then* idiom. Both stubs detected and tagged [TDD]. Polyglot ordering called out in Phase 0. Strongest output of the set.",
+      "timestamp": "2026-05-29T17:37:10.685Z"
+    },
+    {
+      "run_id": "eval-4-without_skill",
+      "feedback": "Both syntaxes present and unmixed (describe/it for TS, 6x func Test for Go). Missing When/Then naming convention. No remediation plan. Sections are split correctly though, no bleeding.",
+      "timestamp": "2026-05-29T17:37:10.685Z"
+    },
+    {
+      "run_id": "eval-5-with_skill",
+      "feedback": "E2E Gaps section present, TS use-case gap reported. Excellent domain call: uses Playwright { request } fixture for a server-side use-case (not { page }). playwright.config.ts properly skipped via SKIP_PATTERNS. Stub detection + [TDD] tagging on every exit-door gap.",
+      "timestamp": "2026-05-29T17:37:10.685Z"
+    },
+    {
+      "run_id": "eval-5-without_skill",
+      "feedback": "E2E Gaps section present with TS use-case gap. Uses describe/it but lacks the When/Then naming convention. Trivial-stub framing is honest. No remediation plan, less structured overall \u2014 and no Playwright fixture choice rationale.",
+      "timestamp": "2026-05-29T17:37:10.685Z"
+    },
+    {
+      "run_id": "eval-6-with_skill",
+      "feedback": "Correctly detects bash via .sh extension with no config files. Uses bats syntax (not describe/it, not func Test \u2014 prompt requirement met). Stubbing kubectl is the right approach. AAA structure honored, Remediation plan included. Concise (2474 chars).",
+      "timestamp": "2026-05-29T17:37:10.685Z"
+    },
+    {
+      "run_id": "eval-6-without_skill",
+      "feedback": "Solid bats output with @test \"When ..., Then ...\" naming (7x). Stubs kubectl on PATH, covers exit-code propagation, missing binary, stdout assertion. No describe(, no func Test \u2014 prompt criteria met. Treats bash natively rather than as fallback. Strong baseline.",
+      "timestamp": "2026-05-29T17:37:10.685Z"
+    }
+  ],
+  "status": "in_progress"
+}

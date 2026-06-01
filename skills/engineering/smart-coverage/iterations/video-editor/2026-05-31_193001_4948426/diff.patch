@@ -1,0 +1,4230 @@
+diff --git a/apps/server/src/infrastructure/messaging/MonitorFactory.ts b/apps/server/src/infrastructure/messaging/MonitorFactory.ts
+new file mode 100644
+index 0000000..456965d
+--- /dev/null
++++ b/apps/server/src/infrastructure/messaging/MonitorFactory.ts
+@@ -0,0 +1,15 @@
++export interface PublishMonitor {
++	logStarted(): void;
++	logRetry(cause: Error): void;
++	logSuccess(output?: unknown): void;
++	logAborting(cause: Error): void;
++	logInvalidInput(input: unknown, invalidity: Error): void;
++}
++
++export interface PublishMonitorConfig {
++	processName: string;
++	businessId: string;
++	stageName: string;
++}
++
++export type MonitorFactory = (config: PublishMonitorConfig, extraInfo?: object) => PublishMonitor;
+diff --git a/apps/server/src/infrastructure/messaging/__tests__/createRecordingMonitorFactory.ts b/apps/server/src/infrastructure/messaging/__tests__/createRecordingMonitorFactory.ts
+new file mode 100644
+index 0000000..2eb9a36
+--- /dev/null
++++ b/apps/server/src/infrastructure/messaging/__tests__/createRecordingMonitorFactory.ts
+@@ -0,0 +1,35 @@
++import type { MonitorFactory, PublishMonitor, PublishMonitorConfig } from "../MonitorFactory.ts";
++
++type MonitorEvent =
++	| { type: "started"; config: PublishMonitorConfig; extra?: object }
++	| { type: "retry"; config: PublishMonitorConfig; error: Error }
++	| { type: "success"; config: PublishMonitorConfig }
++	| { type: "aborting"; config: PublishMonitorConfig; error: Error };
++
++export interface RecordingMonitorFactory {
++	factory: MonitorFactory;
++	events: MonitorEvent[];
++}
++
++export const createRecordingMonitorFactory = (): RecordingMonitorFactory => {
++	const events: MonitorEvent[] = [];
++	const factory: MonitorFactory = (
++		config: PublishMonitorConfig,
++		extra?: object,
++	): PublishMonitor => ({
++		logStarted: () => {
++			events.push({ type: "started", config, extra });
++		},
++		logRetry: (cause: Error) => {
++			events.push({ type: "retry", config, error: cause });
++		},
++		logSuccess: () => {
++			events.push({ type: "success", config });
++		},
++		logAborting: (cause: Error) => {
++			events.push({ type: "aborting", config, error: cause });
++		},
++		logInvalidInput: () => {},
++	});
++	return { factory, events };
++};
+diff --git a/apps/server/src/infrastructure/messaging/createNoopMonitorFactory.ts b/apps/server/src/infrastructure/messaging/createNoopMonitorFactory.ts
+new file mode 100644
+index 0000000..449d10a
+--- /dev/null
++++ b/apps/server/src/infrastructure/messaging/createNoopMonitorFactory.ts
+@@ -0,0 +1,9 @@
++import type { MonitorFactory } from "./MonitorFactory.ts";
++
++export const createNoopMonitorFactory = (): MonitorFactory => () => ({
++	logStarted: () => {},
++	logRetry: () => {},
++	logSuccess: () => {},
++	logAborting: () => {},
++	logInvalidInput: () => {},
++});
+diff --git a/packages/contract/CLAUDE.md b/packages/contract/CLAUDE.md
+new file mode 100644
+index 0000000..dab4c65
+--- /dev/null
++++ b/packages/contract/CLAUDE.md
+@@ -0,0 +1,86 @@
++# contract Package
++
++> **Closed network deployment:** Consumed by apps running in air-gapped environments. No runtime network calls — purely type definitions and Zod schemas.
++>
++> **Keep this file updated:** Update whenever message types, schemas, exports, or routing keys change.
++
++Published as `@video-editor/contract`. Defines:
++- **iframe protocol** — Zod schemas + TS types for `postMessage` between the editor and its parent (`./iframe`).
++- **AMQP events** — versioned envelope + Zod schemas for events published by `apps/server` to RabbitMQ (`./events`).
++- **shared** — reusable payload types (`SavedMediaItem`, `SavedMediaPayload`) used by both iframe and events.
++
++## Commands
++
++```bash
++pnpm build        # tsc -p tsconfig.json (required before test)
++pnpm test         # pnpm build && node --test dist/**/*.test.js
++pnpm type-check   # tsc -p tsconfig.json --noEmit
++pnpm lint         # biome check .
++pnpm format       # biome format . --write
++```
++
++## Source Structure
++
++```
++src/
++├── index.ts                 # Root barrel — re-exports iframe + shared
++├── iframe/
++│   ├── index.ts             # iframe barrel
++│   ├── messages.ts          # Message type definitions
++│   ├── payloads.ts          # Payload interfaces
++│   ├── schemas.ts           # Zod validation schemas
++│   ├── helpers.ts           # Factory functions
++│   ├── mocks.ts             # Mock fixtures
++│   └── helpers.test.ts      # Test suite
++├── events/
++│   ├── index.ts             # events barrel
++│   ├── envelope.ts          # Envelope<T> + header-key constants
++│   ├── export.ts            # v1 schemas for export.started/completed/failed
++│   ├── mocks.ts             # Mock envelopes
++│   ├── export.test.ts       # Schema tests
++│   └── README.md            # External-team onboarding doc
++└── shared/
++    ├── saved-media.ts       # SavedMediaItem, SavedMediaPayload
++    └── saved-media.test.ts  # Schema tests
++```
++
++## Package Exports
++
++```json
++"exports": {
++  ".":               "./dist/index.js",
++  "./iframe":        "./dist/iframe/index.js",
++  "./iframe/mocks":  "./dist/iframe/mocks.js",
++  "./events":        "./dist/events/index.js",
++  "./events/mocks":  "./dist/events/mocks.js"
++}
++```
++
++## Key Exports
++
++### `@video-editor/contract/iframe`
++
++- `parentToEditorMessageSchema`, `editorToParentMessageSchema` — Zod schemas
++- `ParentToEditorMessage`, `EditorToParentMessage` and subtypes
++- `PreviewItemPayload` union (`recording-range`, `media`, `audio-range`)
++- `EditorReadyMessage`, `EditorMediaSavedMessage`
++- Factories: `createPreviewItemAddedMessage`, `createPreviewItemRejectedMessage`, `createProjectClearedMessage`, `createMediaSavedMessage`
++
++### `@video-editor/contract/events`
++
++- `EXCHANGE_NAME` (`"video-editor"`), routing-key constants (`EXPORT_STARTED`, `EXPORT_COMPLETED`, `EXPORT_FAILED`)
++- Version constants (`EXPORT_STARTED_V1` …)
++- AMQP header constants (`X_EVENT_NAME`, `X_EVENT_VERSION`)
++- `Envelope<T>` type + `envelopeSchema(dataSchema)` factory
++- Per-event Zod schemas + TS types: `exportStartedEnvelopeSchema`, `ExportStartedData`, etc.
++- `mockExportStartedEnvelope` etc. via `./events/mocks`
++
++See [`src/events/README.md`](src/events/README.md) for the consumer-side onboarding doc.
++
++### Root (`@video-editor/contract`)
++
++Re-exports `iframe/*` + `shared/*` for convenience.
++
++## Dependencies
++
++- `zod` v4 — runtime validation
+diff --git a/packages/contract/README.md b/packages/contract/README.md
+new file mode 100644
+index 0000000..9dc66e2
+--- /dev/null
++++ b/packages/contract/README.md
+@@ -0,0 +1,121 @@
++# editor-contract — `@video-editor/iframe-contract`
++
++Shared postMessage protocol for the video editor's iframe integration. Provides Zod schemas, TypeScript types, and factory functions for typed communication between the editor iframe and any host page.
++
++## Installation
++
++This package is a workspace dependency. In the monorepo, reference it directly:
++
++```json
++{
++  "dependencies": {
++    "@video-editor/iframe-contract": "workspace:*"
++  }
++}
++```
++
++## Commands
++
++```bash
++pnpm build        # tsc (required before running tests)
++pnpm test         # pnpm build && node --test dist/**/*.test.js
++pnpm type-check   # tsc --noEmit
++pnpm lint         # Biome check
++pnpm format       # Biome format
++```
++
++## Protocol Overview
++
++```
++Host page                        Editor iframe (at /editor/embed)
++─────────────────────────────────────────────────────────────────
++                                 ──EDITOR_READY──────────────────▶
++◀── EDITOR_ADD_PREVIEW_ITEM ─────
++         ─────────────── preview_item_added / preview_item_rejected ──▶
++◀── EDITOR_CLEAR_PROJECT ────────
++         ─────────────────────────────────── project_cleared ──────▶
++```
++
++## API
++
++### Schemas
++
++```ts
++import { parentToEditorMessageSchema } from '@video-editor/iframe-contract';
++
++// Validates messages received by the editor
++const message = parentToEditorMessageSchema.parse(event.data);
++```
++
++### Types
++
++```ts
++import type {
++  ParentToEditorMessage,
++  EditorToParentMessage,
++  PreviewItemPayload,
++  EditorReadyMessage,
++} from '@video-editor/iframe-contract';
++```
++
++`PreviewItemPayload` is a discriminated union of three shapes:
++
++| `kind` | Description |
++|---|---|
++| `recording-range` | A recording segment with time range |
++| `media` | A generic media asset |
++| `audio-range` | An audio segment with time range |
++
++### Factory Functions
++
++```ts
++import {
++  createPreviewItemAddedMessage,
++  createPreviewItemRejectedMessage,
++  createProjectClearedMessage,
++} from '@video-editor/iframe-contract';
++
++// Build typed response messages to send from the editor back to the host
++const response = createPreviewItemAddedMessage({ ... });
++window.parent.postMessage(response, targetOrigin);
++```
++
++### Mock Fixtures
++
++```ts
++import { ... } from '@video-editor/iframe-contract/mocks';
++```
++
++Available as a separate export to keep test helpers out of production bundles.
++
++## Source Structure
++
++```
++src/
++├── index.ts         # Main export
++├── messages.ts      # Message type definitions
++├── payloads.ts      # Payload interfaces
++├── schemas.ts       # Zod validation schemas
++├── helpers.ts       # Factory functions
++├── helpers.test.ts  # Test suite
++└── mocks.ts         # Mock fixtures
++```
++
++## Package Exports
++
++```json
++{
++  "exports": {
++    ".":       "./dist/index.js",
++    "./mocks": "./dist/mocks.js"
++  }
++}
++```
++
++`src/` is available directly for workspace consumers during development — no build step required for the monorepo.
++
++## Dependencies
++
++| Package | Purpose |
++|---|---|
++| `zod` v4 | Runtime schema validation and type inference |
+diff --git a/packages/contract/package.json b/packages/contract/package.json
+new file mode 100644
+index 0000000..07b6348
+--- /dev/null
++++ b/packages/contract/package.json
+@@ -0,0 +1,51 @@
++{
++	"name": "@video-editor/contract",
++	"version": "0.1.0",
++	"private": true,
++	"type": "module",
++	"main": "./dist/index.js",
++	"types": "./dist/index.d.ts",
++	"exports": {
++		".": {
++			"types": "./dist/index.d.ts",
++			"import": "./dist/index.js",
++			"default": "./dist/index.js"
++		},
++		"./iframe": {
++			"types": "./dist/iframe/index.d.ts",
++			"import": "./dist/iframe/index.js",
++			"default": "./dist/iframe/index.js"
++		},
++		"./iframe/mocks": {
++			"types": "./dist/iframe/mocks.d.ts",
++			"import": "./dist/iframe/mocks.js",
++			"default": "./dist/iframe/mocks.js"
++		},
++		"./events": {
++			"types": "./dist/events/index.d.ts",
++			"import": "./dist/events/index.js",
++			"default": "./dist/events/index.js"
++		},
++		"./events/mocks": {
++			"types": "./dist/events/mocks.d.ts",
++			"import": "./dist/events/mocks.js",
++			"default": "./dist/events/mocks.js"
++		}
++	},
++	"files": [
++		"dist"
++	],
++	"scripts": {
++		"build": "tsc -p tsconfig.json",
++		"type-check": "tsc -p tsconfig.json --noEmit",
++		"test": "pnpm build && node --test dist/**/*.test.js",
++		"lint": "biome check . --write"
++	},
++	"dependencies": {
++		"zod": "catalog:"
++	},
++	"devDependencies": {
++		"@types/node": "catalog:",
++		"typescript": "catalog:"
++	}
++}
+diff --git a/packages/contract/src/events/README.md b/packages/contract/src/events/README.md
+new file mode 100644
+index 0000000..187d3b4
+--- /dev/null
++++ b/packages/contract/src/events/README.md
+@@ -0,0 +1,90 @@
++# Events Module — `@video-editor/contract/events`
++
++Versioned AMQP event contracts published by `apps/server` to RabbitMQ. Other teams import this module to type-check their consumers and validate messages on receipt.
++
++## Exchange
++
++| Name | Type | Durable |
++|---|---|---|
++| `video-editor` | topic | yes |
++
++All events publish to this single exchange. Bind your queue against it with a routing-key pattern that matches the events you care about.
++
++## Routing Keys
++
++Pattern: `<domain>.<action>` (lowercase, dot-separated).
++
++| Routing Key | Event | Schema |
++|---|---|---|
++| `export.started` | Render job started | `exportStartedEnvelopeSchema` |
++| `export.completed` | Render output uploaded | `exportCompletedEnvelopeSchema` |
++| `export.failed` | Render job failed | `exportFailedEnvelopeSchema` |
++
++Bind all export events with `export.#` or pick selectively with `export.completed`.
++
++## Envelope Shape
++
++Every message body is the same envelope:
++
++```ts
++type Envelope<T> = {
++  eventName: string;       // matches routing key
++  eventVersion: number;    // schema version, starts at 1
++  occurredAt: string;      // ISO-8601 UTC timestamp
++  traceparent?: string;    // W3C trace context (optional)
++  data: T;                 // event-specific payload
++};
++```
++
++Body is JSON. `contentType: application/json`. `persistent: true` (delivery-mode 2).
++
++## AMQP Headers
++
++| Header | Value | Purpose |
++|---|---|---|
++| `x-event-name` | e.g. `export.started` | Filter without parsing body |
++| `x-event-version` | e.g. `1` | Version routing without parsing body |
++
++Headers always match the envelope fields. Consumers may use either.
++
++## Binding a Queue
++
++Example via `rabbitmqadmin`:
++
++```bash
++rabbitmqadmin declare queue name=my-team-export durable=true
++rabbitmqadmin declare binding source=video-editor destination=my-team-export routing_key='export.#'
++```
++
++Example consumer (Node + amqplib):
++
++```ts
++import { exportStartedEnvelopeSchema } from "@video-editor/contract/events";
++
++ch.consume("my-team-export", (msg) => {
++  if (!msg) return;
++  const body = JSON.parse(msg.content.toString());
++  const parsed = exportStartedEnvelopeSchema.safeParse(body);
++  if (!parsed.success) {
++    ch.nack(msg, false, false); // route to DLX
++    return;
++  }
++  // ... handle parsed.data
++  ch.ack(msg);
++});
++```
++
++## Versioning Policy
++
++- **Additive change** (new optional field): same `eventVersion`. Old consumers still parse.
++- **Breaking change** (rename, remove, retype field): new `eventVersion`. Server publishes both old and new in parallel for at least 4 weeks. Schedule the cutover with consuming teams.
++
++## Dead-Lettering
++
++Consumer-side concern. Each team binds its own queue with its own DLX policy. The publisher does not configure DLX.
++
++## Delivery Guarantees
++
++- **Publisher** uses confirms + `mandatory: true`. The server treats broker-ack as success; unrouted or unconfirmed messages are logged and retried.
++- **Consumer** must use manual ack. Ack only after processing succeeds. Nack-without-requeue on schema validation failure (route to your DLX).
++- **At-least-once**. Consumers must be idempotent (key on `data.jobId`).
+diff --git a/packages/contract/src/events/envelope.ts b/packages/contract/src/events/envelope.ts
+new file mode 100644
+index 0000000..33b1202
+--- /dev/null
++++ b/packages/contract/src/events/envelope.ts
+@@ -0,0 +1,23 @@
++import { z } from "zod";
++
++export const X_EVENT_NAME = "x-event-name";
++export const X_EVENT_VERSION = "x-event-version";
++
++export const EXCHANGE_NAME = "video-editor";
++
++export type Envelope<TData> = {
++	eventName: string;
++	eventVersion: number;
++	occurredAt: string;
++	traceparent?: string;
++	data: TData;
++};
++
++export const envelopeSchema = <T extends z.ZodTypeAny>(dataSchema: T) =>
++	z.strictObject({
++		eventName: z.string().min(1),
++		eventVersion: z.number().int().positive(),
++		occurredAt: z.string().min(1),
++		traceparent: z.string().optional(),
++		data: dataSchema,
++	});
+diff --git a/packages/contract/src/events/export.test.ts b/packages/contract/src/events/export.test.ts
+new file mode 100644
+index 0000000..29d4e1b
+--- /dev/null
++++ b/packages/contract/src/events/export.test.ts
+@@ -0,0 +1,95 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++import {
++	EXPORT_COMPLETED,
++	EXPORT_COMPLETED_V1,
++	EXPORT_FAILED,
++	EXPORT_FAILED_V1,
++	EXPORT_STARTED,
++	EXPORT_STARTED_V1,
++	exportCompletedEnvelopeSchema,
++	exportFailedEnvelopeSchema,
++	exportStartedEnvelopeSchema,
++} from "./export.js";
++import {
++	mockExportCompletedEnvelope,
++	mockExportFailedEnvelope,
++	mockExportStartedEnvelope,
++} from "./mocks.js";
++
++describe("event routing keys", () => {
++	it("uses lowercase domain.action pattern", () => {
++		assert.equal(EXPORT_STARTED, "export.started");
++		assert.equal(EXPORT_COMPLETED, "export.completed");
++		assert.equal(EXPORT_FAILED, "export.failed");
++	});
++
++	it("starts at version 1", () => {
++		assert.equal(EXPORT_STARTED_V1, 1);
++		assert.equal(EXPORT_COMPLETED_V1, 1);
++		assert.equal(EXPORT_FAILED_V1, 1);
++	});
++});
++
++describe("exportStartedEnvelopeSchema", () => {
++	it("accepts the v1 mock envelope", () => {
++		assert.equal(exportStartedEnvelopeSchema.safeParse(mockExportStartedEnvelope).success, true);
++	});
++
++	it("rejects an envelope missing eventVersion", () => {
++		const { eventVersion: _v, ...rest } = mockExportStartedEnvelope;
++		assert.equal(exportStartedEnvelopeSchema.safeParse(rest).success, false);
++	});
++
++	it("rejects envelope with non-positive eventVersion", () => {
++		assert.equal(
++			exportStartedEnvelopeSchema.safeParse({ ...mockExportStartedEnvelope, eventVersion: 0 })
++				.success,
++			false,
++		);
++	});
++
++	it("rejects envelope whose data is missing jobId", () => {
++		const { jobId: _j, ...restData } = mockExportStartedEnvelope.data;
++		assert.equal(
++			exportStartedEnvelopeSchema.safeParse({ ...mockExportStartedEnvelope, data: restData })
++				.success,
++			false,
++		);
++	});
++});
++
++describe("exportCompletedEnvelopeSchema", () => {
++	it("accepts the v1 mock envelope", () => {
++		assert.equal(
++			exportCompletedEnvelopeSchema.safeParse(mockExportCompletedEnvelope).success,
++			true,
++		);
++	});
++
++	it("rejects non-http url", () => {
++		assert.equal(
++			exportCompletedEnvelopeSchema.safeParse({
++				...mockExportCompletedEnvelope,
++				data: { ...mockExportCompletedEnvelope.data, url: "ftp://x/y.mp4" },
++			}).success,
++			false,
++		);
++	});
++});
++
++describe("exportFailedEnvelopeSchema", () => {
++	it("accepts the v1 mock envelope", () => {
++		assert.equal(exportFailedEnvelopeSchema.safeParse(mockExportFailedEnvelope).success, true);
++	});
++
++	it("rejects empty error string", () => {
++		assert.equal(
++			exportFailedEnvelopeSchema.safeParse({
++				...mockExportFailedEnvelope,
++				data: { ...mockExportFailedEnvelope.data, error: "" },
++			}).success,
++			false,
++		);
++	});
++});
+diff --git a/packages/contract/src/events/export.ts b/packages/contract/src/events/export.ts
+new file mode 100644
+index 0000000..3d3ccaa
+--- /dev/null
++++ b/packages/contract/src/events/export.ts
+@@ -0,0 +1,69 @@
++import { z } from "zod";
++import type { SavedMediaItem } from "../shared/saved-media.js";
++import { savedMediaItemSchema } from "../shared/saved-media.js";
++import { type Envelope, envelopeSchema } from "./envelope.js";
++
++export const EXPORT_STARTED = "export.started";
++export const EXPORT_COMPLETED = "export.completed";
++export const EXPORT_FAILED = "export.failed";
++
++export const EXPORT_STARTED_V1 = 1;
++export const EXPORT_COMPLETED_V1 = 1;
++export const EXPORT_FAILED_V1 = 1;
++
++const nonEmptyString = z.string().trim().min(1);
++const httpUrl = nonEmptyString.refine((v) => /^https?:\/\//i.test(v), {
++	message: "url must be an http/https URL",
++});
++
++export const exportStartedDataSchema = z.strictObject({
++	jobId: nonEmptyString,
++	mediaId: nonEmptyString,
++	mediaName: nonEmptyString,
++	downloadToComputer: z.boolean(),
++	saveToPersonalChannel: z.boolean(),
++	selectedUnitChannelIds: z.array(z.string()),
++	exportType: z.union([z.literal("mp4"), z.literal("webp")]),
++	items: z.array(savedMediaItemSchema),
++});
++
++export const exportCompletedDataSchema = z.strictObject({
++	jobId: nonEmptyString,
++	url: httpUrl,
++	exportType: z.union([z.literal("mp4"), z.literal("webp")]),
++});
++
++export const exportFailedDataSchema = z.strictObject({
++	jobId: nonEmptyString,
++	error: nonEmptyString,
++});
++
++export type ExportStartedData = {
++	jobId: string;
++	mediaId: string;
++	mediaName: string;
++	downloadToComputer: boolean;
++	saveToPersonalChannel: boolean;
++	selectedUnitChannelIds: string[];
++	exportType: "mp4" | "webp";
++	items: SavedMediaItem[];
++};
++
++export type ExportCompletedData = {
++	jobId: string;
++	url: string;
++	exportType: "mp4" | "webp";
++};
++
++export type ExportFailedData = {
++	jobId: string;
++	error: string;
++};
++
++export type ExportStartedEnvelope = Envelope<ExportStartedData>;
++export type ExportCompletedEnvelope = Envelope<ExportCompletedData>;
++export type ExportFailedEnvelope = Envelope<ExportFailedData>;
++
++export const exportStartedEnvelopeSchema = envelopeSchema(exportStartedDataSchema);
++export const exportCompletedEnvelopeSchema = envelopeSchema(exportCompletedDataSchema);
++export const exportFailedEnvelopeSchema = envelopeSchema(exportFailedDataSchema);
+diff --git a/packages/contract/src/events/index.ts b/packages/contract/src/events/index.ts
+new file mode 100644
+index 0000000..43142e7
+--- /dev/null
++++ b/packages/contract/src/events/index.ts
+@@ -0,0 +1,29 @@
++export type { Envelope } from "./envelope.js";
++export {
++	EXCHANGE_NAME,
++	envelopeSchema,
++	X_EVENT_NAME,
++	X_EVENT_VERSION,
++} from "./envelope.js";
++export type {
++	ExportCompletedData,
++	ExportCompletedEnvelope,
++	ExportFailedData,
++	ExportFailedEnvelope,
++	ExportStartedData,
++	ExportStartedEnvelope,
++} from "./export.js";
++export {
++	EXPORT_COMPLETED,
++	EXPORT_COMPLETED_V1,
++	EXPORT_FAILED,
++	EXPORT_FAILED_V1,
++	EXPORT_STARTED,
++	EXPORT_STARTED_V1,
++	exportCompletedDataSchema,
++	exportCompletedEnvelopeSchema,
++	exportFailedDataSchema,
++	exportFailedEnvelopeSchema,
++	exportStartedDataSchema,
++	exportStartedEnvelopeSchema,
++} from "./export.js";
+diff --git a/packages/contract/src/events/mocks.ts b/packages/contract/src/events/mocks.ts
+new file mode 100644
+index 0000000..c27bad3
+--- /dev/null
++++ b/packages/contract/src/events/mocks.ts
+@@ -0,0 +1,42 @@
++import type {
++	ExportCompletedEnvelope,
++	ExportFailedEnvelope,
++	ExportStartedEnvelope,
++} from "./export.js";
++
++export const mockExportStartedEnvelope: ExportStartedEnvelope = {
++	eventName: "export.started",
++	eventVersion: 1,
++	occurredAt: "2026-05-31T12:00:00.000Z",
++	data: {
++		jobId: "job-1",
++		mediaId: "550e8400-e29b-41d4-a716-446655440000",
++		mediaName: "Demo Export",
++		downloadToComputer: true,
++		saveToPersonalChannel: false,
++		selectedUnitChannelIds: [],
++		exportType: "mp4",
++		items: [{ type: "clip", id: "media-1" }],
++	},
++};
++
++export const mockExportCompletedEnvelope: ExportCompletedEnvelope = {
++	eventName: "export.completed",
++	eventVersion: 1,
++	occurredAt: "2026-05-31T12:00:30.000Z",
++	data: {
++		jobId: "job-1",
++		url: "https://example.com/output/job-1.mp4",
++		exportType: "mp4",
++	},
++};
++
++export const mockExportFailedEnvelope: ExportFailedEnvelope = {
++	eventName: "export.failed",
++	eventVersion: 1,
++	occurredAt: "2026-05-31T12:00:30.000Z",
++	data: {
++		jobId: "job-1",
++		error: "ffmpeg exited with code 1",
++	},
++};
+diff --git a/packages/contract/src/iframe/helpers.test.ts b/packages/contract/src/iframe/helpers.test.ts
+new file mode 100644
+index 0000000..acffc68
+--- /dev/null
++++ b/packages/contract/src/iframe/helpers.test.ts
+@@ -0,0 +1,377 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++import {
++	createPreviewItemAddedMessage,
++	createPreviewItemRejectedMessage,
++	createProjectClearedMessage,
++	isParentToEditorMessage,
++	parseParentToEditorMessage,
++} from "./helpers.js";
++import {
++	mockAudioRangeMessage,
++	mockClearProjectMessage,
++	mockMediaHlsMessage,
++	mockMediaMp4Message,
++	mockRecordingRangeHlsMessage,
++	mockRecordingRangeNoPlaybackMessage,
++} from "./mocks.js";
++import { editorToParentMessageSchema, parentToEditorMessageSchema } from "./schemas.js";
++
++const baseRecordingPayload = {
++	kind: "recording-range" as const,
++	channelId: "20574",
++	startTimeMs: 1000,
++	endTimeMs: 2000,
++	durationMs: 1000,
++	playback: { kind: "hls" as const, src: "https://example.com/index.m3u8" },
++};
++
++const baseAudioPayload = {
++	kind: "audio-range" as const,
++	audioId: "a1",
++	startTimeMs: 1000,
++	endTimeMs: 2000,
++	durationMs: 1000,
++	playback: { kind: "audio" as const, src: "https://example.com/track.m4a" },
++};
++
++const MAX_MS = 1000 * 60 * 60; // 1 hour
++
++describe("iframe contract schemas — business rules (new refines)", () => {
++	it("rejects unsafe (non-http/https) src in hls playback", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				...baseRecordingPayload,
++				playback: { kind: "hls", src: "file:///etc/passwd" },
++			},
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("rejects non-http/https src in media playback", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				kind: "media",
++				mediaId: "m-1",
++				playback: { kind: "mp4", src: "javascript:alert(1)" },
++			},
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("rejects recording-range durationMs exceeding 1 hour", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				...baseRecordingPayload,
++				durationMs: MAX_MS + 1,
++				endTimeMs: baseRecordingPayload.startTimeMs + MAX_MS + 1,
++			},
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("accepts recording-range durationMs exactly at the 1-hour cap", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				...baseRecordingPayload,
++				durationMs: MAX_MS,
++				endTimeMs: baseRecordingPayload.startTimeMs + MAX_MS,
++			},
++		});
++		assert.equal(result.success, true);
++	});
++
++	it("rejects audio-range durationMs exceeding 1 hour", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				...baseAudioPayload,
++				durationMs: MAX_MS + 1,
++			},
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("rejects media durationMs exceeding 1 hour", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				kind: "media",
++				mediaId: "m-1",
++				durationMs: MAX_MS + 1,
++				playback: { kind: "mp4", src: "https://example.com/v.mp4" },
++			},
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("rejects audio-range with non-hls src that is not audio media", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				...baseAudioPayload,
++				playback: { kind: "audio", src: "https://example.com/track.mp4" },
++			},
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("accepts audio-range with hls src that looks like video", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				...baseAudioPayload,
++				playback: { kind: "hls", src: "https://example.com/video.m3u8" },
++			},
++		});
++		assert.equal(result.success, true);
++	});
++});
++
++describe("iframe contract schemas", () => {
++	it("parses valid add-preview-item messages", () => {
++		assert.equal(parentToEditorMessageSchema.safeParse(mockRecordingRangeHlsMessage).success, true);
++		assert.equal(parentToEditorMessageSchema.safeParse(mockMediaMp4Message).success, true);
++		assert.equal(parentToEditorMessageSchema.safeParse(mockMediaHlsMessage).success, true);
++		assert.equal(parentToEditorMessageSchema.safeParse(mockAudioRangeMessage).success, true);
++	});
++
++	it("accepts recording-range without playback (editor resolves HLS URL)", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse(mockRecordingRangeNoPlaybackMessage).success,
++			true,
++		);
++	});
++
++	it("parses valid clear-project messages", () => {
++		assert.equal(parentToEditorMessageSchema.safeParse(mockClearProjectMessage).success, true);
++	});
++
++	it("rejects invalid message shapes", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				requestId: "bad",
++			}).success,
++			false,
++		);
++	});
++
++	it("rejects durationMs = 0 for recording-range", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: { ...baseRecordingPayload, durationMs: 0 },
++			}).success,
++			false,
++		);
++	});
++
++	it("rejects durationMs = 0 for audio-range", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: { ...baseAudioPayload, durationMs: 0 },
++			}).success,
++			false,
++		);
++	});
++
++	it("rejects endTimeMs < startTimeMs for recording-range", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: { ...baseRecordingPayload, startTimeMs: 100, endTimeMs: 99 },
++			}).success,
++			false,
++		);
++	});
++
++	it("rejects endTimeMs === startTimeMs (zero duration range) for recording-range", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: { ...baseRecordingPayload, startTimeMs: 100, endTimeMs: 100 },
++			}).success,
++			false,
++		);
++	});
++
++	it("rejects endTimeMs === startTimeMs for audio-range", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: { ...baseAudioPayload, startTimeMs: 100, endTimeMs: 100 },
++			}).success,
++			false,
++		);
++	});
++
++	it("accepts sourceOffsetMs = 0 (valid boundary)", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: { ...baseRecordingPayload, sourceOffsetMs: 0 },
++			}).success,
++			true,
++		);
++	});
++
++	it("rejects sourceOffsetMs > durationMs", () => {
++		assert.equal(
++			parentToEditorMessageSchema.safeParse({
++				type: "EDITOR_ADD_PREVIEW_ITEM",
++				payload: {
++					...baseRecordingPayload,
++					durationMs: 1000,
++					sourceOffsetMs: 1001,
++				},
++			}).success,
++			false,
++		);
++	});
++});
++
++describe("editorMediaSavedMessageSchema", () => {
++	const validMsg = {
++		type: "EDITOR_MEDIA_SAVED",
++		mediaId: "550e8400-e29b-41d4-a716-446655440000",
++		mediaName: "My Clip",
++		downloadToComputer: true,
++		saveToPersonalChannel: false,
++		selectedUnitChannelIds: [],
++		url: "https://example.com/output/video.mp4",
++		exportType: "mp4",
++		items: [
++			{ type: "recording", id: "ch-1", from: 0, to: 5000 },
++			{ type: "audio", id: "aud-1", from: 1000, to: 4000 },
++			{ type: "image", id: "img-1" },
++			{ type: "clip", id: "media-1" },
++		],
++	};
++
++	it("accepts a valid EDITOR_MEDIA_SAVED message", () => {
++		assert.equal(editorToParentMessageSchema.safeParse(validMsg).success, true);
++	});
++
++	it("rejects missing mediaName", () => {
++		const { mediaName: _m, ...rest } = validMsg;
++		assert.equal(editorToParentMessageSchema.safeParse(rest).success, false);
++	});
++
++	it("rejects non-http url", () => {
++		assert.equal(
++			editorToParentMessageSchema.safeParse({ ...validMsg, url: "ftp://bad.com/x.mp4" }).success,
++			false,
++		);
++	});
++
++	it("rejects unknown exportType", () => {
++		assert.equal(
++			editorToParentMessageSchema.safeParse({ ...validMsg, exportType: "json" }).success,
++			false,
++		);
++	});
++
++	it("rejects recording item missing from/to", () => {
++		assert.equal(
++			editorToParentMessageSchema.safeParse({
++				...validMsg,
++				items: [{ type: "recording", id: "ch-1" }],
++			}).success,
++			false,
++		);
++	});
++
++	it("accepts empty items array", () => {
++		assert.equal(editorToParentMessageSchema.safeParse({ ...validMsg, items: [] }).success, true);
++	});
++
++	it("rejects EDITOR_MEDIA_SAVED without mediaId", () => {
++		const { mediaId: _m, ...withoutMediaId } = validMsg as typeof validMsg & { mediaId: string };
++		assert.equal(editorToParentMessageSchema.safeParse(withoutMediaId).success, false);
++	});
++
++	it("rejects EDITOR_MEDIA_SAVED without selectedUnitChannelIds", () => {
++		const { selectedUnitChannelIds: _s, ...withoutChannels } = validMsg as typeof validMsg & {
++			selectedUnitChannelIds: string[];
++		};
++		assert.equal(editorToParentMessageSchema.safeParse(withoutChannels).success, false);
++	});
++
++	it("accepts EDITOR_MEDIA_SAVED with mediaId and selectedUnitChannelIds", () => {
++		assert.equal(
++			editorToParentMessageSchema.safeParse({
++				...validMsg,
++				mediaId: "550e8400-e29b-41d4-a716-446655440000",
++				selectedUnitChannelIds: ["ch-1", "ch-2"],
++			}).success,
++			true,
++		);
++	});
++
++	it("accepts EDITOR_MEDIA_SAVED with empty selectedUnitChannelIds", () => {
++		assert.equal(
++			editorToParentMessageSchema.safeParse({
++				...validMsg,
++				mediaId: "550e8400-e29b-41d4-a716-446655440000",
++				selectedUnitChannelIds: [],
++			}).success,
++			true,
++		);
++	});
++});
++
++describe("iframe contract helpers", () => {
++	it("detects valid parent-to-editor messages", () => {
++		assert.equal(isParentToEditorMessage(mockMediaMp4Message), true);
++		assert.equal(isParentToEditorMessage({ type: "UNKNOWN" }), false);
++	});
++
++	it("parses valid parent-to-editor messages", () => {
++		const parsed = parseParentToEditorMessage(mockMediaHlsMessage);
++		assert.equal(parsed.type, "EDITOR_ADD_PREVIEW_ITEM");
++		if (parsed.type !== "EDITOR_ADD_PREVIEW_ITEM") {
++			assert.fail("Expected an add-preview-item message");
++		}
++		assert.equal(parsed.payload.kind, "media");
++	});
++
++	it("creates response messages with the expected shapes", () => {
++		assert.deepEqual(createPreviewItemAddedMessage("item-1", "req-1"), {
++			type: "EDITOR_PREVIEW_ITEM_ADDED",
++			requestId: "req-1",
++			itemId: "item-1",
++		});
++		assert.deepEqual(createPreviewItemRejectedMessage("bad request", "req-2"), {
++			type: "EDITOR_PREVIEW_ITEM_REJECTED",
++			requestId: "req-2",
++			reason: "bad request",
++		});
++		assert.deepEqual(createProjectClearedMessage("req-3"), {
++			type: "EDITOR_PROJECT_CLEARED",
++			requestId: "req-3",
++		});
++	});
++
++	it("keeps all exported mocks schema-valid", () => {
++		for (const message of [
++			mockRecordingRangeHlsMessage,
++			mockRecordingRangeNoPlaybackMessage,
++			mockMediaMp4Message,
++			mockMediaHlsMessage,
++			mockAudioRangeMessage,
++			mockClearProjectMessage,
++		]) {
++			assert.equal(
++				parentToEditorMessageSchema.safeParse(message).success,
++				true,
++				`Mock failed schema validation: ${JSON.stringify(message)}`,
++			);
++		}
++	});
++});
+diff --git a/packages/contract/src/iframe/helpers.ts b/packages/contract/src/iframe/helpers.ts
+new file mode 100644
+index 0000000..294c180
+--- /dev/null
++++ b/packages/contract/src/iframe/helpers.ts
+@@ -0,0 +1,60 @@
++import type {
++	EditorMediaSavedMessage,
++	EditorPreviewItemAddedMessage,
++	EditorPreviewItemRejectedMessage,
++	EditorProjectClearedMessage,
++	ParentToEditorMessage,
++	SavedMediaItem,
++} from "./messages.js";
++
++import { parentToEditorMessageSchema } from "./schemas.js";
++
++export const isParentToEditorMessage = (value: unknown): value is ParentToEditorMessage =>
++	parentToEditorMessageSchema.safeParse(value).success;
++
++export const parseParentToEditorMessage = (value: unknown): ParentToEditorMessage =>
++	parentToEditorMessageSchema.parse(value);
++
++export const createPreviewItemAddedMessage = (
++	itemId: string,
++	requestId?: string,
++): EditorPreviewItemAddedMessage => ({
++	type: "EDITOR_PREVIEW_ITEM_ADDED",
++	requestId,
++	itemId,
++});
++
++export const createPreviewItemRejectedMessage = (
++	reason: string,
++	requestId?: string,
++): EditorPreviewItemRejectedMessage => ({
++	type: "EDITOR_PREVIEW_ITEM_REJECTED",
++	requestId,
++	reason,
++});
++
++export const createProjectClearedMessage = (requestId?: string): EditorProjectClearedMessage => ({
++	type: "EDITOR_PROJECT_CLEARED",
++	requestId,
++});
++
++export const createMediaSavedMessage = (
++	mediaName: string,
++	downloadToComputer: boolean,
++	saveToPersonalChannel: boolean,
++	url: string,
++	exportType: "mp4" | "webp",
++	items: SavedMediaItem[],
++	mediaId: string,
++	selectedUnitChannelIds: string[],
++): EditorMediaSavedMessage => ({
++	type: "EDITOR_MEDIA_SAVED",
++	mediaId,
++	mediaName,
++	downloadToComputer,
++	saveToPersonalChannel,
++	selectedUnitChannelIds,
++	url,
++	exportType,
++	items,
++});
+diff --git a/packages/contract/src/iframe/index.ts b/packages/contract/src/iframe/index.ts
+new file mode 100644
+index 0000000..5798326
+--- /dev/null
++++ b/packages/contract/src/iframe/index.ts
+@@ -0,0 +1,56 @@
++export {
++	createMediaSavedMessage,
++	createPreviewItemAddedMessage,
++	createPreviewItemRejectedMessage,
++	createProjectClearedMessage,
++	isParentToEditorMessage,
++	parseParentToEditorMessage,
++} from "./helpers.js";
++export type {
++	EditorAddPreviewItemMessage,
++	EditorClearProjectMessage,
++	EditorMediaSavedMessage,
++	EditorPreviewItemAddedMessage,
++	EditorPreviewItemRejectedMessage,
++	EditorProjectClearedMessage,
++	EditorReadyMessage,
++	EditorSetAuthMessage,
++	EditorToParentMessage,
++	ParentToEditorMessage,
++	SavedMediaItem,
++	SavedMediaPayload,
++} from "./messages.js";
++export type {
++	AudioPlayback,
++	AudioRangePayload,
++	HlsPlayback,
++	MediaPayload,
++	MediaPlayback,
++	Playback,
++	PreviewItemPayload,
++	RecordingRangePayload,
++} from "./payloads.js";
++export {
++	DEMO_PREVIEW_CHANNEL_ID,
++	DEMO_PREVIEW_DEFAULT_END_MS,
++	DEMO_PREVIEW_SEGMENT_START_MS,
++} from "./payloads.js";
++export {
++	audioPlaybackSchema,
++	audioRangePayloadSchema,
++	editorAddPreviewItemMessageSchema,
++	editorClearProjectMessageSchema,
++	editorMediaSavedMessageSchema,
++	editorPreviewItemAddedMessageSchema,
++	editorPreviewItemRejectedMessageSchema,
++	editorProjectClearedMessageSchema,
++	editorSetAuthMessageSchema,
++	editorToParentMessageSchema,
++	hlsPlaybackSchema,
++	MAX_PREVIEW_DURATION_MS,
++	mediaPayloadSchema,
++	mediaPlaybackSchema,
++	parentToEditorMessageSchema,
++	previewItemPayloadSchema,
++	recordingRangePayloadSchema,
++} from "./schemas.js";
+diff --git a/packages/contract/src/iframe/messages.ts b/packages/contract/src/iframe/messages.ts
+new file mode 100644
+index 0000000..67d5a3a
+--- /dev/null
++++ b/packages/contract/src/iframe/messages.ts
+@@ -0,0 +1,58 @@
++import type { SavedMediaPayload } from "../shared/saved-media.js";
++import type { PreviewItemPayload } from "./payloads.js";
++
++export type { SavedMediaItem, SavedMediaPayload } from "../shared/saved-media.js";
++
++export type EditorAddPreviewItemMessage = {
++	type: "EDITOR_ADD_PREVIEW_ITEM";
++	requestId?: string;
++	payload: PreviewItemPayload;
++};
++
++export type EditorClearProjectMessage = {
++	type: "EDITOR_CLEAR_PROJECT";
++	requestId?: string;
++};
++
++export type EditorSetAuthMessage = {
++	type: "EDITOR_SET_AUTH";
++	token: string;
++};
++
++export type ParentToEditorMessage =
++	| EditorAddPreviewItemMessage
++	| EditorClearProjectMessage
++	| EditorSetAuthMessage;
++
++export type EditorPreviewItemAddedMessage = {
++	type: "EDITOR_PREVIEW_ITEM_ADDED";
++	requestId?: string;
++	itemId: string;
++};
++
++export type EditorPreviewItemRejectedMessage = {
++	type: "EDITOR_PREVIEW_ITEM_REJECTED";
++	requestId?: string;
++	reason: string;
++};
++
++export type EditorProjectClearedMessage = {
++	type: "EDITOR_PROJECT_CLEARED";
++	requestId?: string;
++};
++
++export type EditorReadyMessage = {
++	type: "EDITOR_READY";
++};
++
++export type EditorMediaSavedMessage = SavedMediaPayload & {
++	type: "EDITOR_MEDIA_SAVED";
++	url: string;
++};
++
++export type EditorToParentMessage =
++	| EditorPreviewItemAddedMessage
++	| EditorPreviewItemRejectedMessage
++	| EditorProjectClearedMessage
++	| EditorReadyMessage
++	| EditorMediaSavedMessage;
+diff --git a/packages/contract/src/iframe/mocks.ts b/packages/contract/src/iframe/mocks.ts
+new file mode 100644
+index 0000000..c7a7da5
+--- /dev/null
++++ b/packages/contract/src/iframe/mocks.ts
+@@ -0,0 +1,109 @@
++import type {
++	EditorClearProjectMessage,
++	EditorMediaSavedMessage,
++	ParentToEditorMessage,
++} from "./messages.js";
++
++const mockStartTimeMs = 1778412276333;
++const mockEndTimeMs = 1778412813617;
++const mockDurationMs = mockEndTimeMs - mockStartTimeMs;
++
++export const mockRecordingRangeHlsMessage: ParentToEditorMessage = {
++	type: "EDITOR_ADD_PREVIEW_ITEM",
++	requestId: "mock-recording-range-hls",
++	payload: {
++		kind: "recording-range",
++		channelId: "20574",
++		startTimeMs: mockStartTimeMs,
++		endTimeMs: mockEndTimeMs,
++		durationMs: mockDurationMs,
++		playback: {
++			kind: "hls",
++			src: "https://example.com/api/editor/hls-preview/jobs/mock-recording/index.m3u8",
++		},
++		sourceOffsetMs: 6333,
++		posterSrc: "https://example.com/mock-recording-poster.jpg",
++	},
++};
++
++export const mockMediaMp4Message: ParentToEditorMessage = {
++	type: "EDITOR_ADD_PREVIEW_ITEM",
++	requestId: "mock-media-mp4",
++	payload: {
++		kind: "media",
++		mediaId: "media-1001",
++		durationMs: 120000,
++		playback: {
++			kind: "mp4",
++			src: "https://example.com/media/mock-video.mp4",
++		},
++		posterSrc: "https://example.com/media/mock-video-poster.jpg",
++	},
++};
++
++export const mockMediaHlsMessage: ParentToEditorMessage = {
++	type: "EDITOR_ADD_PREVIEW_ITEM",
++	requestId: "mock-media-hls",
++	payload: {
++		kind: "media",
++		mediaId: "media-1002",
++		durationMs: 180000,
++		playback: {
++			kind: "hls",
++			src: "https://example.com/media/mock-video/index.m3u8",
++		},
++		posterSrc: "https://example.com/media/mock-video-hls-poster.jpg",
++	},
++};
++
++export const mockAudioRangeMessage: ParentToEditorMessage = {
++	type: "EDITOR_ADD_PREVIEW_ITEM",
++	requestId: "mock-audio-range",
++	payload: {
++		kind: "audio-range",
++		audioId: "audio-501",
++		startTimeMs: mockStartTimeMs,
++		endTimeMs: mockEndTimeMs,
++		durationMs: mockDurationMs,
++		playback: {
++			kind: "audio",
++			src: "https://example.com/audio/mock-track.m4a",
++		},
++		sourceOffsetMs: 6333,
++	},
++};
++
++export const mockRecordingRangeNoPlaybackMessage: ParentToEditorMessage = {
++	type: "EDITOR_ADD_PREVIEW_ITEM",
++	requestId: "mock-recording-range-no-playback",
++	payload: {
++		kind: "recording-range",
++		channelId: "20574",
++		startTimeMs: mockStartTimeMs,
++		endTimeMs: mockEndTimeMs,
++		durationMs: mockDurationMs,
++		sourceOffsetMs: 6333,
++	},
++};
++
++export const mockClearProjectMessage: EditorClearProjectMessage = {
++	type: "EDITOR_CLEAR_PROJECT",
++	requestId: "mock-clear-project",
++};
++
++export const mockMediaSavedMessage: EditorMediaSavedMessage = {
++	type: "EDITOR_MEDIA_SAVED",
++	mediaId: "550e8400-e29b-41d4-a716-446655440000",
++	mediaName: "My Edited Clip",
++	downloadToComputer: true,
++	saveToPersonalChannel: false,
++	selectedUnitChannelIds: [],
++	url: "https://example.com/output/mock-video.mp4",
++	exportType: "mp4",
++	items: [
++		{ type: "recording", id: "20574", from: 0, to: 537284 },
++		{ type: "audio", id: "audio-501", from: 0, to: 537284 },
++		{ type: "image", id: "img-item-1" },
++		{ type: "clip", id: "media-1001" },
++	],
++};
+diff --git a/packages/contract/src/iframe/payloads.ts b/packages/contract/src/iframe/payloads.ts
+new file mode 100644
+index 0000000..5552346
+--- /dev/null
++++ b/packages/contract/src/iframe/payloads.ts
+@@ -0,0 +1,55 @@
++export type HlsPlayback = {
++	kind: "hls";
++	src: string;
++};
++
++export type MediaPlayback = {
++	kind: "mp4" | "hls";
++	src: string;
++};
++
++export type AudioPlayback = {
++	kind: "audio" | "hls";
++	src: string;
++};
++
++export type Playback = HlsPlayback | MediaPlayback | AudioPlayback;
++
++export const DEMO_PREVIEW_CHANNEL_ID = "demo-recording";
++export const DEMO_PREVIEW_SEGMENT_START_MS = 1778412270000;
++export const DEMO_PREVIEW_DEFAULT_END_MS = DEMO_PREVIEW_SEGMENT_START_MS + 30000;
++
++export type RecordingRangePayload = {
++	kind: "recording-range";
++	channelId: string;
++	startTimeMs: number;
++	endTimeMs: number;
++	durationMs: number;
++	/** When absent, the editor resolves the HLS playlist URL via POST /api/editor/preview-source. */
++	playback?: HlsPlayback;
++	sourceOffsetMs?: number;
++	posterSrc?: string;
++	name?: string;
++};
++
++export type MediaPayload = {
++	kind: "media";
++	mediaId: string;
++	durationMs?: number;
++	playback: MediaPlayback;
++	posterSrc?: string;
++	name?: string;
++};
++
++export type AudioRangePayload = {
++	kind: "audio-range";
++	audioId: string;
++	startTimeMs?: number;
++	endTimeMs?: number;
++	durationMs: number;
++	playback: AudioPlayback;
++	sourceOffsetMs?: number;
++	name?: string;
++};
++
++export type PreviewItemPayload = RecordingRangePayload | MediaPayload | AudioRangePayload;
+diff --git a/packages/contract/src/iframe/schemas.ts b/packages/contract/src/iframe/schemas.ts
+new file mode 100644
+index 0000000..08cf54d
+--- /dev/null
++++ b/packages/contract/src/iframe/schemas.ts
+@@ -0,0 +1,181 @@
++import { z } from "zod";
++import { savedMediaPayloadSchema } from "../shared/saved-media.js";
++
++export const MAX_PREVIEW_DURATION_MS = 1000 * 60 * 60 * 1;
++
++const positiveNumber = z.number().finite().min(0);
++const positiveDuration = z.number().finite().positive();
++const nonEmptyString = z.string().trim().min(1);
++const requestIdSchema = z.string().trim().min(1).optional();
++
++const safeMediaUrl = (src: string) => /^https?:\/\//i.test(src);
++const likelyAudioSrc = (src: string) => /\.(m3u8|mp3|wav|m4a|aac|ogg)(\?|$)/i.test(src);
++const safeSrc = nonEmptyString.refine(safeMediaUrl, {
++	message: "src must be an http/https URL",
++});
++
++export const hlsPlaybackSchema = z.strictObject({
++	kind: z.literal("hls"),
++	src: safeSrc,
++});
++
++export const mediaPlaybackSchema = z.strictObject({
++	kind: z.union([z.literal("mp4"), z.literal("hls")]),
++	src: safeSrc,
++});
++
++export const audioPlaybackSchema = z.strictObject({
++	kind: z.union([z.literal("audio"), z.literal("hls")]),
++	src: safeSrc,
++});
++
++export const recordingRangePayloadSchema = z
++	.strictObject({
++		kind: z.literal("recording-range"),
++		channelId: nonEmptyString,
++		startTimeMs: positiveNumber,
++		endTimeMs: positiveNumber,
++		durationMs: positiveDuration,
++		playback: hlsPlaybackSchema.optional(),
++		sourceOffsetMs: positiveNumber.optional(),
++		posterSrc: nonEmptyString.optional(),
++		name: z.string().optional(),
++	})
++	.superRefine((value, ctx) => {
++		if (value.endTimeMs <= value.startTimeMs) {
++			ctx.addIssue({
++				code: z.ZodIssueCode.custom,
++				message: "endTimeMs must be greater than startTimeMs",
++				path: ["endTimeMs"],
++			});
++		}
++
++		if (value.sourceOffsetMs !== undefined && value.sourceOffsetMs > value.durationMs) {
++			ctx.addIssue({
++				code: z.ZodIssueCode.custom,
++				message: "sourceOffsetMs must be less than or equal to durationMs",
++				path: ["sourceOffsetMs"],
++			});
++		}
++	})
++	.refine((p) => p.durationMs <= MAX_PREVIEW_DURATION_MS, {
++		message: "durationMs exceeds the maximum supported preview duration",
++		path: ["durationMs"],
++	});
++
++export const mediaPayloadSchema = z
++	.strictObject({
++		kind: z.literal("media"),
++		mediaId: nonEmptyString,
++		durationMs: positiveNumber.optional(),
++		playback: mediaPlaybackSchema,
++		posterSrc: nonEmptyString.optional(),
++		name: z.string().optional(),
++	})
++	.refine((p) => (p.durationMs ?? 0) <= MAX_PREVIEW_DURATION_MS, {
++		message: "durationMs exceeds the maximum supported preview duration",
++		path: ["durationMs"],
++	});
++
++export const audioRangePayloadSchema = z
++	.strictObject({
++		kind: z.literal("audio-range"),
++		audioId: nonEmptyString,
++		startTimeMs: positiveNumber.optional(),
++		endTimeMs: positiveNumber.optional(),
++		durationMs: positiveDuration,
++		playback: audioPlaybackSchema,
++		sourceOffsetMs: positiveNumber.optional(),
++		name: z.string().optional(),
++	})
++	.superRefine((value, ctx) => {
++		if (
++			value.startTimeMs !== undefined &&
++			value.endTimeMs !== undefined &&
++			value.endTimeMs <= value.startTimeMs
++		) {
++			ctx.addIssue({
++				code: z.ZodIssueCode.custom,
++				message: "endTimeMs must be greater than startTimeMs",
++				path: ["endTimeMs"],
++			});
++		}
++
++		if (value.sourceOffsetMs !== undefined && value.sourceOffsetMs > value.durationMs) {
++			ctx.addIssue({
++				code: z.ZodIssueCode.custom,
++				message: "sourceOffsetMs must be less than or equal to durationMs",
++				path: ["sourceOffsetMs"],
++			});
++		}
++
++		if (value.playback.kind !== "hls" && !likelyAudioSrc(value.playback.src)) {
++			ctx.addIssue({
++				code: z.ZodIssueCode.custom,
++				message: "audio-range src must point to audio or HLS media",
++				path: ["playback", "src"],
++			});
++		}
++	})
++	.refine((p) => p.durationMs <= MAX_PREVIEW_DURATION_MS, {
++		message: "durationMs exceeds the maximum supported preview duration",
++		path: ["durationMs"],
++	});
++
++export const previewItemPayloadSchema = z.union([
++	recordingRangePayloadSchema,
++	mediaPayloadSchema,
++	audioRangePayloadSchema,
++]);
++
++export const editorAddPreviewItemMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_ADD_PREVIEW_ITEM"),
++	requestId: requestIdSchema,
++	payload: previewItemPayloadSchema,
++});
++
++export const editorClearProjectMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_CLEAR_PROJECT"),
++	requestId: requestIdSchema,
++});
++
++export const editorSetAuthMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_SET_AUTH"),
++	token: nonEmptyString,
++});
++
++export const parentToEditorMessageSchema = z.union([
++	editorAddPreviewItemMessageSchema,
++	editorClearProjectMessageSchema,
++	editorSetAuthMessageSchema,
++]);
++
++export const editorPreviewItemAddedMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_PREVIEW_ITEM_ADDED"),
++	requestId: requestIdSchema,
++	itemId: nonEmptyString,
++});
++
++export const editorPreviewItemRejectedMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_PREVIEW_ITEM_REJECTED"),
++	requestId: requestIdSchema,
++	reason: nonEmptyString,
++});
++
++export const editorProjectClearedMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_PROJECT_CLEARED"),
++	requestId: requestIdSchema,
++});
++
++export const editorMediaSavedMessageSchema = z.strictObject({
++	...savedMediaPayloadSchema.shape,
++	type: z.literal("EDITOR_MEDIA_SAVED"),
++	url: safeSrc,
++});
++
++export const editorToParentMessageSchema = z.union([
++	editorPreviewItemAddedMessageSchema,
++	editorPreviewItemRejectedMessageSchema,
++	editorProjectClearedMessageSchema,
++	editorMediaSavedMessageSchema,
++]);
+diff --git a/packages/contract/src/index.ts b/packages/contract/src/index.ts
+new file mode 100644
+index 0000000..99ac2f2
+--- /dev/null
++++ b/packages/contract/src/index.ts
+@@ -0,0 +1,53 @@
++export type {
++	AudioPlayback,
++	AudioRangePayload,
++	EditorAddPreviewItemMessage,
++	EditorClearProjectMessage,
++	EditorMediaSavedMessage,
++	EditorPreviewItemAddedMessage,
++	EditorPreviewItemRejectedMessage,
++	EditorProjectClearedMessage,
++	EditorReadyMessage,
++	EditorSetAuthMessage,
++	EditorToParentMessage,
++	HlsPlayback,
++	MediaPayload,
++	MediaPlayback,
++	ParentToEditorMessage,
++	Playback,
++	PreviewItemPayload,
++	RecordingRangePayload,
++} from "./iframe/index.js";
++export {
++	audioPlaybackSchema,
++	audioRangePayloadSchema,
++	createMediaSavedMessage,
++	createPreviewItemAddedMessage,
++	createPreviewItemRejectedMessage,
++	createProjectClearedMessage,
++	DEMO_PREVIEW_CHANNEL_ID,
++	DEMO_PREVIEW_DEFAULT_END_MS,
++	DEMO_PREVIEW_SEGMENT_START_MS,
++	editorAddPreviewItemMessageSchema,
++	editorClearProjectMessageSchema,
++	editorMediaSavedMessageSchema,
++	editorPreviewItemAddedMessageSchema,
++	editorPreviewItemRejectedMessageSchema,
++	editorProjectClearedMessageSchema,
++	editorSetAuthMessageSchema,
++	editorToParentMessageSchema,
++	hlsPlaybackSchema,
++	isParentToEditorMessage,
++	MAX_PREVIEW_DURATION_MS,
++	mediaPayloadSchema,
++	mediaPlaybackSchema,
++	parentToEditorMessageSchema,
++	parseParentToEditorMessage,
++	previewItemPayloadSchema,
++	recordingRangePayloadSchema,
++} from "./iframe/index.js";
++export type { SavedMediaItem, SavedMediaPayload } from "./shared/saved-media.js";
++export {
++	savedMediaItemSchema,
++	savedMediaPayloadSchema,
++} from "./shared/saved-media.js";
+diff --git a/packages/contract/src/shared/saved-media.test.ts b/packages/contract/src/shared/saved-media.test.ts
+new file mode 100644
+index 0000000..ca783c7
+--- /dev/null
++++ b/packages/contract/src/shared/saved-media.test.ts
+@@ -0,0 +1,63 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++import { savedMediaItemSchema, savedMediaPayloadSchema } from "./saved-media.js";
++
++describe("savedMediaItemSchema", () => {
++	it("accepts image item", () => {
++		assert.equal(savedMediaItemSchema.safeParse({ type: "image", id: "img-1" }).success, true);
++	});
++
++	it("accepts clip item", () => {
++		assert.equal(savedMediaItemSchema.safeParse({ type: "clip", id: "clip-1" }).success, true);
++	});
++
++	it("accepts recording with from/to", () => {
++		assert.equal(
++			savedMediaItemSchema.safeParse({ type: "recording", id: "ch-1", from: 0, to: 100 }).success,
++			true,
++		);
++	});
++
++	it("accepts audio with from/to", () => {
++		assert.equal(
++			savedMediaItemSchema.safeParse({ type: "audio", id: "aud-1", from: 0, to: 100 }).success,
++			true,
++		);
++	});
++
++	it("rejects recording missing from/to", () => {
++		assert.equal(savedMediaItemSchema.safeParse({ type: "recording", id: "ch-1" }).success, false);
++	});
++
++	it("rejects unknown type", () => {
++		assert.equal(savedMediaItemSchema.safeParse({ type: "foo", id: "x" }).success, false);
++	});
++});
++
++describe("savedMediaPayloadSchema", () => {
++	const valid = {
++		mediaId: "550e8400-e29b-41d4-a716-446655440000",
++		mediaName: "Clip A",
++		downloadToComputer: true,
++		saveToPersonalChannel: false,
++		selectedUnitChannelIds: [],
++		exportType: "mp4",
++		items: [{ type: "image", id: "img-1" }],
++	};
++
++	it("accepts a valid payload", () => {
++		assert.equal(savedMediaPayloadSchema.safeParse(valid).success, true);
++	});
++
++	it("rejects missing mediaName", () => {
++		const { mediaName: _m, ...rest } = valid;
++		assert.equal(savedMediaPayloadSchema.safeParse(rest).success, false);
++	});
++
++	it("rejects unknown exportType", () => {
++		assert.equal(
++			savedMediaPayloadSchema.safeParse({ ...valid, exportType: "json" }).success,
++			false,
++		);
++	});
++});
+diff --git a/packages/contract/src/shared/saved-media.ts b/packages/contract/src/shared/saved-media.ts
+new file mode 100644
+index 0000000..2ad1cf6
+--- /dev/null
++++ b/packages/contract/src/shared/saved-media.ts
+@@ -0,0 +1,47 @@
++import { z } from "zod";
++
++export type SavedMediaItem =
++	| { type: "image"; id: string }
++	| { type: "clip"; id: string }
++	| { type: "recording"; id: string; from: number; to: number }
++	| { type: "audio"; id: string; from: number; to: number };
++
++export type SavedMediaPayload = {
++	mediaId: string;
++	mediaName: string;
++	downloadToComputer: boolean;
++	saveToPersonalChannel: boolean;
++	selectedUnitChannelIds: string[];
++	exportType: "mp4" | "webp";
++	items: SavedMediaItem[];
++};
++
++const nonEmptyString = z.string().trim().min(1);
++const positiveNumber = z.number().finite().min(0);
++
++export const savedMediaItemSchema = z.discriminatedUnion("type", [
++	z.strictObject({ type: z.literal("image"), id: nonEmptyString }),
++	z.strictObject({ type: z.literal("clip"), id: nonEmptyString }),
++	z.strictObject({
++		type: z.literal("recording"),
++		id: nonEmptyString,
++		from: positiveNumber,
++		to: positiveNumber,
++	}),
++	z.strictObject({
++		type: z.literal("audio"),
++		id: nonEmptyString,
++		from: positiveNumber,
++		to: positiveNumber,
++	}),
++]);
++
++export const savedMediaPayloadSchema = z.strictObject({
++	mediaId: nonEmptyString,
++	mediaName: nonEmptyString,
++	downloadToComputer: z.boolean(),
++	saveToPersonalChannel: z.boolean(),
++	selectedUnitChannelIds: z.array(z.string()),
++	exportType: z.union([z.literal("mp4"), z.literal("webp")]),
++	items: z.array(savedMediaItemSchema),
++});
+diff --git a/packages/contract/tsconfig.json b/packages/contract/tsconfig.json
+new file mode 100644
+index 0000000..881778d
+--- /dev/null
++++ b/packages/contract/tsconfig.json
+@@ -0,0 +1,23 @@
++{
++	"compilerOptions": {
++		"target": "ES2022",
++		"module": "NodeNext",
++		"moduleResolution": "NodeNext",
++		"strict": true,
++		"skipLibCheck": true,
++		"esModuleInterop": true,
++		"resolveJsonModule": true,
++		"types": ["node"],
++		"noUnusedLocals": true,
++		"useUnknownInCatchVariables": true,
++		"noFallthroughCasesInSwitch": true,
++		"noImplicitReturns": true,
++		"verbatimModuleSyntax": true,
++		"declaration": true,
++		"sourceMap": true,
++		"rootDir": "src",
++		"outDir": "dist"
++	},
++	"include": ["src/**/*.ts"],
++	"exclude": ["dist", "node_modules"]
++}
+diff --git a/CLAUDE.md b/CLAUDE.md
+index f51c211..b76e814 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -16,14 +16,14 @@ apps/
+   server/      — Fastify + Node.js (port 4000)
+   iframe-demo/ — Angular 21 demo harness for iframe integration (port 8080)
+ packages/
+-  editor-contract/  — shared postMessage contract (@video-editor/iframe-contract)
++  contract/         — shared postMessage + AMQP event contract (@video-editor/contract)
+ ```
+ 
+ Per-app guidance:
+ - [apps/frontend/CLAUDE.md](apps/frontend/CLAUDE.md)
+ - [apps/server/CLAUDE.md](apps/server/CLAUDE.md)
+ - [apps/iframe-demo/CLAUDE.md](apps/iframe-demo/CLAUDE.md)
+-- [packages/editor-contract/CLAUDE.md](packages/editor-contract/CLAUDE.md)
++- [packages/contract/CLAUDE.md](packages/contract/CLAUDE.md)
+ 
+ ## Repo Rules
+ 
+@@ -70,7 +70,7 @@ pnpm format
+ 
+ # Tests (Vitest)
+ cd apps/server && pnpm test   # vitest run
+-cd packages/editor-contract && pnpm test   # builds then runs dist/**/*.test.js
++cd packages/contract && pnpm test   # builds then runs dist/**/*.test.js
+ ```
+ 
+ ## Local Dev Setup
+@@ -124,11 +124,15 @@ Angular 21 standalone app on port 8080. Embeds `/editor/embed` in a floating, dr
+ 
+ → See [apps/iframe-demo/CLAUDE.md](apps/iframe-demo/CLAUDE.md) for full detail.
+ 
+-### Package: editor-contract (`packages/editor-contract`)
++### Package: contract (`packages/contract`)
+ 
+-Published as `@video-editor/iframe-contract`. Defines Zod schemas and TypeScript types for the postMessage protocol. Key exports: `parentToEditorMessageSchema`, `ParentToEditorMessage`, `EditorToParentMessage`, `PreviewItemPayload`, `EditorReadyMessage`, and response factories.
++Published as `@video-editor/contract`. Two sub-paths:
++- `/iframe` — Zod schemas + types for the editor↔parent postMessage protocol.
++- `/events` — versioned `Envelope<T>` + Zod schemas for AMQP events published to the `video-editor` topic exchange (`export.started`, `export.completed`, `export.failed`). External teams bind queues against this exchange and import schemas from `/events` for consumer-side validation.
+ 
+-→ See [packages/editor-contract/CLAUDE.md](packages/editor-contract/CLAUDE.md) for full detail.
++Root export (`@video-editor/contract`) re-exports `iframe` + shared `SavedMediaItem`/`SavedMediaPayload`.
++
++→ See [packages/contract/CLAUDE.md](packages/contract/CLAUDE.md) for full detail and [packages/contract/src/events/README.md](packages/contract/src/events/README.md) for the consumer onboarding doc.
+ 
+ ## Key External Dependencies
+ 
+diff --git a/CONTEXT.md b/CONTEXT.md
+index 42c15f2..5302bec 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -7,3 +7,13 @@
+ Zod is the single validation library for both env config and HTTP request schemas. TypeBox is not used. Type inference uses `z.infer<typeof schema>`.
+ 
+ → See [ADR 0001](docs/adr/0001-zod-over-typebox.md)
++
++## Messaging
++
++**Publish** — server hands an event envelope to the broker on the `video-editor` topic exchange. Considered successful only when the broker confirms it (publisher confirms). A publish that the broker never acks, or that the broker returns as unrouted, is a failure the server must log and meter.
++
++**Unrouted** — broker received the message but no queue is bound to a matching routing key. Surfaces as a return when published with `mandatory: true`. Treated as a publish failure on the server side.
++
++**Broker Ack** — the broker's confirm that it accepted (and routed) the message. The server's responsibility ends here. Whether a consumer ultimately processes the message is the consuming team's concern, not the server's.
++
++**Event Envelope** — versioned wrapper around the domain payload: `{ eventName, eventVersion, occurredAt, traceparent, data }`. Same shape stamped into AMQP headers (`x-event-name`, `x-event-version`) so subscribers can filter without parsing the body.
+diff --git a/apps/frontend/package.json b/apps/frontend/package.json
+index d6ec09e..041d4a9 100644
+--- a/apps/frontend/package.json
++++ b/apps/frontend/package.json
+@@ -41,7 +41,7 @@
+ 		"@remotion/player": "^4.0.465",
+ 		"@remotion/shapes": "^4.0.465",
+ 		"@tanstack/react-query": "^5.100.14",
+-		"@video-editor/iframe-contract": "workspace:*",
++		"@video-editor/contract": "workspace:*",
+ 		"axios": "^1.10.0",
+ 		"class-variance-authority": "^0.7.1",
+ 		"clsx": "^2.1.1",
+diff --git a/apps/frontend/src/features/editor/editor.tsx b/apps/frontend/src/features/editor/editor.tsx
+index f3b2095..e359f3d 100644
+--- a/apps/frontend/src/features/editor/editor.tsx
++++ b/apps/frontend/src/features/editor/editor.tsx
+@@ -351,11 +351,7 @@ const Editor = ({ tempId, id }: { tempId?: string; id?: string }) => {
+ 			<main id="editor-main" tabIndex={-1} className="flex flex-col flex-1 min-h-0 outline-none">
+ 				<div className="flex flex-1 min-h-0">
+ 					<div className="flex-1 min-w-0 h-full">
+-						<SceneContainer
+-							sceneRef={sceneRef}
+-							stateManager={stateManager}
+-							trackItem={trackItem}
+-						/>
++						<SceneContainer sceneRef={sceneRef} stateManager={stateManager} trackItem={trackItem} />
+ 					</div>
+ 					<aside
+ 						aria-label="לוח בקרה"
+diff --git a/apps/frontend/src/features/editor/external-preview/payload-intake.ts b/apps/frontend/src/features/editor/external-preview/payload-intake.ts
+index 510baa2..2e398e7 100644
+--- a/apps/frontend/src/features/editor/external-preview/payload-intake.ts
++++ b/apps/frontend/src/features/editor/external-preview/payload-intake.ts
+@@ -3,7 +3,7 @@ import type StateManager from "@designcombo/state";
+ import { ADD_AUDIO, ADD_VIDEO } from "@designcombo/state";
+ import { generateId } from "@designcombo/timeline";
+ import type { ITrackItem } from "@designcombo/types";
+-import type { PreviewItemPayload } from "@video-editor/iframe-contract";
++import type { PreviewItemPayload } from "@video-editor/contract";
+ import { resolvePreviewSource } from "./preview-source-api";
+ 
+ export type ExternalMetadata = {
+diff --git a/apps/frontend/src/features/editor/external-preview/use-editor-post-message.ts b/apps/frontend/src/features/editor/external-preview/use-editor-post-message.ts
+index e29a1c6..e7306e2 100644
+--- a/apps/frontend/src/features/editor/external-preview/use-editor-post-message.ts
++++ b/apps/frontend/src/features/editor/external-preview/use-editor-post-message.ts
+@@ -10,7 +10,7 @@ import {
+ 	type EditorToParentMessage,
+ 	type ParentToEditorMessage,
+ 	parentToEditorMessageSchema,
+-} from "@video-editor/iframe-contract";
++} from "@video-editor/contract";
+ import { useEffect, useMemo, useRef } from "react";
+ import { addPreviewItemToEditor, clearProject } from "./payload-intake";
+ import { parseAllowedOrigins } from "./utils";
+diff --git a/apps/frontend/src/features/editor/scene/interactions.tsx b/apps/frontend/src/features/editor/scene/interactions.tsx
+index 1951b3d..1ff588b 100644
+--- a/apps/frontend/src/features/editor/scene/interactions.tsx
++++ b/apps/frontend/src/features/editor/scene/interactions.tsx
+@@ -50,7 +50,12 @@ function scaleDiv(selector: string, scale: number, currentWidth: number, current
+ 	}
+ }
+ 
+-export function SceneInteractions({ stateManager, containerRef, zoom, size }: SceneInteractionsProps) {
++export function SceneInteractions({
++	stateManager,
++	containerRef,
++	zoom,
++	size,
++}: SceneInteractionsProps) {
+ 	const [targets, setTargets] = useState<HTMLDivElement[]>([]);
+ 	const [selection, setSelection] = useState<Selection>();
+ 	const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+@@ -233,7 +238,10 @@ export function SceneInteractions({ stateManager, containerRef, zoom, size }: Sc
+ 			if (!sceneItem) return;
+ 			e.preventDefault();
+ 			const id = getIdFromClassName((sceneItem as HTMLElement).className);
+-			stateManager.updateState({ activeIds: [id] }, { updateHistory: false, kind: "layer:selection" });
++			stateManager.updateState(
++				{ activeIds: [id] },
++				{ updateHistory: false, kind: "layer:selection" },
++			);
+ 			setContextMenu({ x: e.clientX, y: e.clientY });
+ 		};
+ 		container.addEventListener("contextmenu", handleContextMenu);
+@@ -284,7 +292,8 @@ export function SceneInteractions({ stateManager, containerRef, zoom, size }: Sc
+ 					}}
+ 				/>
+ 			)}
+-			{iconPos && activeIds.length === 1 &&
++			{iconPos &&
++				activeIds.length === 1 &&
+ 				createPortal(
+ 					<button
+ 						type="button"
+@@ -303,8 +312,7 @@ export function SceneInteractions({ stateManager, containerRef, zoom, size }: Sc
+ 						<MoreHorizontal size={14} />
+ 					</button>,
+ 					document.body,
+-				)
+-			}
++				)}
+ 			<Moveable
+ 				ref={moveableRef}
+ 				rotationPosition={"bottom"}
+diff --git a/apps/frontend/src/features/editor/utils/extract-saved-items.ts b/apps/frontend/src/features/editor/utils/extract-saved-items.ts
+index 350139c..9b0fc23 100644
+--- a/apps/frontend/src/features/editor/utils/extract-saved-items.ts
++++ b/apps/frontend/src/features/editor/utils/extract-saved-items.ts
+@@ -1,5 +1,5 @@
+ import type { ITrackItem } from "@designcombo/types";
+-import type { SavedMediaItem } from "@video-editor/iframe-contract";
++import type { SavedMediaItem } from "@video-editor/contract";
+ import type { ExternalMetadata } from "../external-preview/payload-intake";
+ 
+ export function extractSavedItems(trackItemsMap: Record<string, ITrackItem>): SavedMediaItem[] {
+diff --git a/apps/server/CLAUDE.md b/apps/server/CLAUDE.md
+index f6da78b..8bc58ee 100644
+--- a/apps/server/CLAUDE.md
++++ b/apps/server/CLAUDE.md
+@@ -97,7 +97,7 @@ Controller: `src/features/editor-export/adapters/inbound/http/editor-export.cont
+ | File | Purpose |
+ |------|---------|
+ | `src/infrastructure/storage/S3StorageAdapter.ts` | AWS SDK v3 S3 client (MinIO locally) |
+-| `src/infrastructure/messaging/RabbitMQPublisher.ts` | RabbitMQ AMQP publisher — exchange `video-editor` (topic), routing keys: `export.started`, `export.completed`, `export.failed` |
++| `src/infrastructure/messaging/RabbitMQPublisher.ts` | RabbitMQ AMQP publisher — exchange `video-editor` (topic), routing keys: `export.started`, `export.completed`, `export.failed`. See *Messaging* below |
+ | `src/infrastructure/ffmpeg/FfmpegVideoProcessor.ts` | FFmpeg video processing via raw `spawn` |
+ | `src/features/render/adapters/outbound/redis/RedisRenderJobStateAdapter.ts` | Render job state in Redis |
+ | `src/features/edit-video/adapters/outbound/redis/RedisEditVideoJobStateAdapter.ts` | Edit-video job progress in Redis |
+@@ -132,6 +132,27 @@ All validated by Zod in `src/config/env.ts`. Key vars:
+ | `SERVER_BASE_URL` | `http://localhost:4001` | Public server URL (used in signed segment URLs) |
+ | `RABBITMQ_URL` | required | AMQP connection URL — service won't start without this |
+ 
++## Messaging (RabbitMQ)
++
++Publisher: `RabbitMQPublisher` (hexagonal infra adapter). Schemas + envelope types from `@video-editor/contract/events`.
++
++| Aspect | Behavior |
++|---|---|
++| Exchange | `video-editor` (topic, durable). Single exchange — any team binds queues against it |
++| Routing keys | `export.started`, `export.completed`, `export.failed` (lowercase `<domain>.<action>`) |
++| Envelope | Every message body is `{ eventName, eventVersion, occurredAt, traceparent, data }`. AMQP headers `x-event-name`, `x-event-version` mirror the envelope so subscribers can filter without parsing JSON |
++| Versioning | Additive change = same `eventVersion`. Breaking change = new version + parallel publish |
++| Confirms | `confirmSelect` + `mandatory: true`. Broker-ack = success. Broker-nack or unrouted-return = failure |
++| Retry | 3 attempts per publish, backoff 100ms / 500ms / 2s. On exhaustion: `logAborting` via `ZMonitor` and **swallow** — controller never sees the error |
++| Monitoring | `ZMonitor` per publish: `processName: "amqp-publish"`, `stageName: <eventName>`, `businessId: <jobId>`. Lifecycle: `logStarted` → `logRetry` (per retry) → `logSuccess` OR `logAborting` |
++| Startup | Eager connect in `System.start()` (after Redis). Fail-fast: throws if broker unreachable |
++| Reconnect | Background loop on connection close/error. Backoff 1s/2s/5s/10s capped at 30s. Each attempt logged via `ZMonitor` (`stageName: "reconnect"`, `businessId: "connection"`). Stops on explicit `close()` |
++| Shutdown | `System.stop()` order: HTTP close → `publisher.drain(5_000)` → `publisher.close()` → `redis.quit()`. Unconfirmed messages at drain timeout logged as `amqp_publish_drained_unconfirmed` |
++| Signals | `SIGTERM`/`SIGINT` registered in `src/index.ts`. Idempotent. Hard-exit fallback at 15s |
++| OTel | Auto-instrumentation via `@opentelemetry/instrumentation-amqplib` (registered in `@ztube/observability`). No custom span attributes |
++
++External teams subscribe by binding their own queue to the `video-editor` exchange and importing schemas from `@video-editor/contract/events`. See [packages/contract/src/events/README.md](../../packages/contract/src/events/README.md).
++
+ ## Tests
+ 
+ Vitest (`vitest.config.ts`). Test files co-located as `*.test.ts`.
+diff --git a/apps/server/package.json b/apps/server/package.json
+index cc799d0..cc49b1d 100644
+--- a/apps/server/package.json
++++ b/apps/server/package.json
+@@ -21,6 +21,7 @@
+ 		"@fastify/cors": "^11.2.0",
+ 		"@fastify/multipart": "^10.0.0",
+ 		"@ffmpeg-installer/ffmpeg": "^1.1.0",
++		"@video-editor/contract": "workspace:*",
+ 		"@ztube/observability": "workspace:*",
+ 		"amqplib": "^2.0.1",
+ 		"fast-xml-parser": "^5.7.3",
+diff --git a/apps/server/src/bootstrap/container.ts b/apps/server/src/bootstrap/container.ts
+index 9f1024c..c4f0fc2 100644
+--- a/apps/server/src/bootstrap/container.ts
++++ b/apps/server/src/bootstrap/container.ts
+@@ -1,3 +1,4 @@
++import { createZMonitor } from "@ztube/observability";
+ import { createClient } from "redis";
+ import type { EnvConfig } from "../config/env.ts";
+ import { RedisEditVideoJobStateAdapter } from "../features/edit-video/adapters/outbound/redis/RedisEditVideoJobStateAdapter.ts";
+@@ -6,7 +7,6 @@ import { RedisRenderJobStateAdapter } from "../features/render/adapters/outbound
+ import { VideoRenderUseCase } from "../features/render/application/use-cases/VideoRenderUseCase.ts";
+ import { UploadUseCase } from "../features/upload/application/use-cases/UploadUseCase.ts";
+ import { FfmpegVideoProcessingAdapter } from "../infrastructure/ffmpeg/FfmpegVideoProcessingAdapter.ts";
+-import type { ExportEventPublisherPort } from "../infrastructure/messaging/RabbitMQPublisher.ts";
+ import { RabbitMQPublisher } from "../infrastructure/messaging/RabbitMQPublisher.ts";
+ import { S3StorageAdapter } from "../infrastructure/storage/S3StorageAdapter.ts";
+ import type { StoragePort } from "../shared/application/ports/outbound/StoragePort.ts";
+@@ -21,7 +21,7 @@ export interface Container {
+ 	renderJobStatePort: RedisRenderJobStateAdapter;
+ 	editVideoJobStatePort: RedisEditVideoJobStateAdapter;
+ 	generatePreviewUseCase: GeneratePreviewUseCase;
+-	exportEventPublisher: ExportEventPublisherPort;
++	exportEventPublisher: RabbitMQPublisher;
+ }
+ 
+ export function buildContainer(config: EnvConfig): Container {
+@@ -50,7 +50,7 @@ export function buildContainer(config: EnvConfig): Container {
+ 	const editVideoJobStatePort = new RedisEditVideoJobStateAdapter(redis);
+ 	const generatePreviewUseCase = new GeneratePreviewUseCase(storage, config);
+ 
+-	const exportEventPublisher: ExportEventPublisherPort = new RabbitMQPublisher(config.RABBITMQ_URL);
++	const exportEventPublisher = new RabbitMQPublisher(config.RABBITMQ_URL, createZMonitor);
+ 
+ 	return {
+ 		storage,
+diff --git a/apps/server/src/bootstrap/system.ts b/apps/server/src/bootstrap/system.ts
+index d131b18..208f342 100644
+--- a/apps/server/src/bootstrap/system.ts
++++ b/apps/server/src/bootstrap/system.ts
+@@ -24,11 +24,25 @@ export class System {
+ 		});
+ 		await this.container.redis.connect();
+ 		Logger.logInfo("[startup] Redis connected");
++		Logger.logInfo("[startup] connecting to RabbitMQ");
++		await this.container.exportEventPublisher.connect();
++		Logger.logInfo("[startup] RabbitMQ connected");
+ 		await this.server.start();
+ 	}
+ 
+ 	async stop(): Promise<void> {
+ 		await this.server.stop();
++		try {
++			Logger.logInfo("[shutdown] draining outstanding publishes");
++			await this.container.exportEventPublisher.drain(5_000);
++			Logger.logInfo("[shutdown] closing RabbitMQ publisher");
++			await this.container.exportEventPublisher.close();
++		} catch (err) {
++			Logger.logError(
++				"[shutdown] publisher drain/close failed",
++				err instanceof Error ? err : new Error(String(err)),
++			);
++		}
+ 		await this.container.redis.quit();
+ 	}
+ }
+diff --git a/apps/server/src/features/render/adapters/inbound/http/__tests__/render.controller.test.ts b/apps/server/src/features/render/adapters/inbound/http/__tests__/render.controller.test.ts
+index 4a9330d..6f65d61 100644
+--- a/apps/server/src/features/render/adapters/inbound/http/__tests__/render.controller.test.ts
++++ b/apps/server/src/features/render/adapters/inbound/http/__tests__/render.controller.test.ts
+@@ -18,10 +18,11 @@ const validDesign = {
+ };
+ 
+ const validSaveMetadata = {
++	mediaId: "550e8400-e29b-41d4-a716-446655440000",
+ 	mediaName: "clip",
+ 	downloadToComputer: true,
+ 	saveToPersonalChannel: false,
+-	selectedChannelIds: ["ch1"],
++	selectedUnitChannelIds: ["ch1"],
+ 	items: [],
+ };
+ 
+diff --git a/apps/server/src/features/render/adapters/inbound/http/render.controller.ts b/apps/server/src/features/render/adapters/inbound/http/render.controller.ts
+index 5ccecba..a824c41 100644
+--- a/apps/server/src/features/render/adapters/inbound/http/render.controller.ts
++++ b/apps/server/src/features/render/adapters/inbound/http/render.controller.ts
+@@ -1,4 +1,5 @@
+ import { randomUUID } from "node:crypto";
++import type { SavedMediaItem } from "@video-editor/contract";
+ import { Logger } from "@ztube/observability";
+ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
+ import type { ExportEventPublisherPort } from "../../../../../infrastructure/messaging/RabbitMQPublisher.ts";
+@@ -11,11 +12,12 @@ import { DesignRenderInputAdapter } from "../design/DesignRenderInputAdapter.ts"
+ import { designPayloadSchema } from "./design-payload.schema.ts";
+ 
+ interface SaveMetadata {
++	mediaId: string;
+ 	mediaName: string;
+ 	downloadToComputer: boolean;
+ 	saveToPersonalChannel: boolean;
+-	selectedChannelIds: string[];
+-	items: unknown[];
++	selectedUnitChannelIds: string[];
++	items: SavedMediaItem[];
+ }
+ 
+ interface StartRenderBody {
+diff --git a/apps/server/src/index.ts b/apps/server/src/index.ts
+index f6398e0..cd6663d 100644
+--- a/apps/server/src/index.ts
++++ b/apps/server/src/index.ts
+@@ -1,4 +1,4 @@
+-import { initTelemetry } from "@ztube/observability";
++import { initTelemetry, Logger } from "@ztube/observability";
+ import { parseEnv } from "./config/env.ts";
+ 
+ const config = parseEnv();
+@@ -14,4 +14,29 @@ if (config.OTEL_ENDPOINT) {
+ 
+ const { System } = await import("./bootstrap/system.ts");
+ const system = new System(config);
++
++let shutdownInFlight = false;
++const shutdown = (signal: string): void => {
++	if (shutdownInFlight) return;
++	shutdownInFlight = true;
++	Logger.logInfo(`[shutdown] received ${signal}`);
++	setTimeout(() => {
++		Logger.logError("[shutdown] timed out — forcing exit", new Error("shutdown timeout"));
++		process.exit(1);
++	}, 15_000).unref();
++	system
++		.stop()
++		.then(() => {
++			Logger.logInfo("[shutdown] complete");
++			process.exit(0);
++		})
++		.catch((err: unknown) => {
++			Logger.logError("[shutdown] failed", err instanceof Error ? err : new Error(String(err)));
++			process.exit(1);
++		});
++};
++
++process.on("SIGTERM", () => shutdown("SIGTERM"));
++process.on("SIGINT", () => shutdown("SIGINT"));
++
+ system.start();
+diff --git a/apps/server/src/infrastructure/messaging/NullExportEventPublisher.ts b/apps/server/src/infrastructure/messaging/NullExportEventPublisher.ts
+index dc7fce7..f906466 100644
+--- a/apps/server/src/infrastructure/messaging/NullExportEventPublisher.ts
++++ b/apps/server/src/infrastructure/messaging/NullExportEventPublisher.ts
+@@ -1,12 +1,12 @@
+ import type {
+-	ExportCompletedEvent,
++	ExportCompletedData,
+ 	ExportEventPublisherPort,
+-	ExportFailedEvent,
+-	ExportStartedEvent,
++	ExportFailedData,
++	ExportStartedData,
+ } from "./RabbitMQPublisher.ts";
+ 
+ export class NullExportEventPublisher implements ExportEventPublisherPort {
+-	async publishExportStarted(_event: ExportStartedEvent): Promise<void> {}
+-	async publishExportCompleted(_event: ExportCompletedEvent): Promise<void> {}
+-	async publishExportFailed(_event: ExportFailedEvent): Promise<void> {}
++	async publishExportStarted(_event: ExportStartedData): Promise<void> {}
++	async publishExportCompleted(_event: ExportCompletedData): Promise<void> {}
++	async publishExportFailed(_event: ExportFailedData): Promise<void> {}
+ }
+diff --git a/apps/server/src/infrastructure/messaging/RabbitMQPublisher.ts b/apps/server/src/infrastructure/messaging/RabbitMQPublisher.ts
+index 12e8b64..ff87a0f 100644
+--- a/apps/server/src/infrastructure/messaging/RabbitMQPublisher.ts
++++ b/apps/server/src/infrastructure/messaging/RabbitMQPublisher.ts
+@@ -1,105 +1,291 @@
+-import type { Channel, ChannelModel } from "amqplib";
++import { randomUUID } from "node:crypto";
++import {
++	type Envelope,
++	EXCHANGE_NAME,
++	EXPORT_COMPLETED,
++	EXPORT_COMPLETED_V1,
++	EXPORT_FAILED,
++	EXPORT_FAILED_V1,
++	EXPORT_STARTED,
++	EXPORT_STARTED_V1,
++	type ExportCompletedData,
++	type ExportFailedData,
++	type ExportStartedData,
++	X_EVENT_NAME,
++	X_EVENT_VERSION,
++} from "@video-editor/contract/events";
++import { Logger } from "@ztube/observability";
++import type { ChannelModel, ConfirmChannel } from "amqplib";
+ import { connect } from "amqplib";
++import type { MonitorFactory } from "./MonitorFactory.ts";
+ 
+ export interface ExportEventPublisherPort {
+-	publishExportStarted(event: ExportStartedEvent): Promise<void>;
+-	publishExportCompleted(event: ExportCompletedEvent): Promise<void>;
+-	publishExportFailed(event: ExportFailedEvent): Promise<void>;
++	publishExportStarted(event: ExportStartedData): Promise<void>;
++	publishExportCompleted(event: ExportCompletedData): Promise<void>;
++	publishExportFailed(event: ExportFailedData): Promise<void>;
+ }
+ 
+-export interface ExportStartedEvent {
+-	jobId: string;
+-	mediaName: string;
+-	downloadToComputer: boolean;
+-	saveToPersonalChannel: boolean;
+-	selectedChannelIds: string[];
+-	exportType: "mp4" | "webp";
+-	items: unknown[];
++export type { ExportCompletedData, ExportFailedData, ExportStartedData };
++
++export class UnroutedError extends Error {
++	constructor(routingKey: string) {
++		super(`Message published to '${routingKey}' returned unrouted (no bound queue)`);
++		this.name = "UnroutedError";
++	}
+ }
+ 
+-export interface ExportCompletedEvent {
+-	jobId: string;
+-	url: string;
+-	exportType: "mp4" | "webp";
++class PublishExhaustedError extends Error {
++	readonly attempts: number;
++	readonly cause: Error;
++	constructor(eventName: string, attempts: number, cause: Error) {
++		super(`Failed to publish '${eventName}' after ${attempts} attempts: ${cause.message}`);
++		this.name = "PublishExhaustedError";
++		this.attempts = attempts;
++		this.cause = cause;
++	}
+ }
+ 
+-export interface ExportFailedEvent {
+-	jobId: string;
+-	error: string;
++interface Inflight {
++	settle: (err?: Error) => void;
+ }
+ 
+-const EXCHANGE = "video-editor";
++const RETRY_BACKOFFS_MS = [100, 500, 2000];
++const RECONNECT_BACKOFFS_MS = [1_000, 2_000, 5_000, 10_000];
++const RECONNECT_BACKOFF_CAP_MS = 30_000;
++
++const sleep = (ms: number): Promise<void> =>
++	new Promise((resolve) => {
++		setTimeout(resolve, ms);
++	});
+ 
+ export class RabbitMQPublisher implements ExportEventPublisherPort {
+ 	private readonly url: string;
++	private readonly monitorFactory: MonitorFactory;
+ 	private connection: ChannelModel | null = null;
+-	private channel: Channel | null = null;
++	private channel: ConfirmChannel | null = null;
++	private inflight: Map<string, Inflight> = new Map();
++	private reconnecting = false;
++	private closed = false;
+ 
+-	constructor(url: string) {
++	constructor(url: string, monitorFactory: MonitorFactory) {
+ 		this.url = url;
++		this.monitorFactory = monitorFactory;
++	}
++
++	async connect(): Promise<void> {
++		await this.ensureChannel();
+ 	}
+ 
+ 	async close(): Promise<void> {
++		this.closed = true;
++		const ch = this.channel;
++		const conn = this.connection;
++		this.channel = null;
++		this.connection = null;
+ 		try {
+-			await this.channel?.close();
++			await ch?.close();
+ 		} catch {}
+ 		try {
+-			await this.connection?.close();
++			await conn?.close();
+ 		} catch {}
+-		this.channel = null;
+-		this.connection = null;
+ 	}
+ 
+-	private async ensureChannel(): Promise<Channel> {
++	async drain(timeoutMs: number): Promise<void> {
++		const start = Date.now();
++		while (this.inflight.size > 0) {
++			if (Date.now() - start > timeoutMs) {
++				for (const id of this.inflight.keys()) {
++					Logger.logWarning("amqp_publish_drained_unconfirmed", { messageId: id });
++				}
++				return;
++			}
++			await sleep(25);
++		}
++	}
++
++	private async ensureChannel(): Promise<ConfirmChannel> {
+ 		if (this.channel) return this.channel;
+ 		this.connection = await connect(this.url);
+-		this.connection.on("error", () => {
++		const onConnectionLost = () => {
+ 			this.connection = null;
+ 			this.channel = null;
+-		});
+-		this.connection.on("close", () => {
+-			this.connection = null;
++			if (!this.closed) {
++				void this.startReconnectLoop();
++			}
++		};
++		this.connection.on("error", onConnectionLost);
++		this.connection.on("close", onConnectionLost);
++		const ch = await this.connection.createConfirmChannel();
++		ch.on("error", () => {
+ 			this.channel = null;
+ 		});
+-		this.channel = await this.connection.createChannel();
+-		this.channel.on("error", () => {
++		ch.on("close", () => {
+ 			this.channel = null;
+ 		});
+-		this.channel.on("close", () => {
+-			this.channel = null;
++		ch.on("return", (msg) => {
++			const id = msg.properties.messageId as string | undefined;
++			if (!id) return;
++			const entry = this.inflight.get(id);
++			if (!entry) return;
++			this.inflight.delete(id);
++			const routingKey = msg.fields.routingKey;
++			entry.settle(new UnroutedError(routingKey));
+ 		});
+-		await this.channel.assertExchange(EXCHANGE, "topic", { durable: true });
+-		return this.channel;
++		await ch.assertExchange(EXCHANGE_NAME, "topic", { durable: true });
++		this.channel = ch;
++		return ch;
+ 	}
+ 
+-	private async publish(routingKey: string, event: unknown): Promise<void> {
+-		const payload = Buffer.from(JSON.stringify(event));
++	private async startReconnectLoop(): Promise<void> {
++		if (this.reconnecting || this.closed) return;
++		this.reconnecting = true;
++		const monitor = this.monitorFactory({
++			processName: "amqp-publish",
++			businessId: "connection",
++			stageName: "reconnect",
++		});
++		monitor.logStarted();
++		let attempt = 0;
++		while (!this.closed) {
++			try {
++				await this.ensureChannel();
++				monitor.logSuccess();
++				this.reconnecting = false;
++				return;
++			} catch (err) {
++				const e = err instanceof Error ? err : new Error(String(err));
++				monitor.logRetry(e);
++				const delay = Math.min(
++					RECONNECT_BACKOFFS_MS[Math.min(attempt, RECONNECT_BACKOFFS_MS.length - 1)],
++					RECONNECT_BACKOFF_CAP_MS,
++				);
++				attempt++;
++				await sleep(delay);
++			}
++		}
++		this.reconnecting = false;
++	}
++
++	private async publishOnce<TData>(
++		eventName: string,
++		eventVersion: number,
++		envelope: Envelope<TData>,
++	): Promise<void> {
++		const ch = await this.ensureChannel();
++		const messageId = randomUUID();
++		const payload = Buffer.from(JSON.stringify(envelope));
++
++		return new Promise<void>((resolve, reject) => {
++			let settled = false;
++			const settle = (err?: Error) => {
++				if (settled) return;
++				settled = true;
++				if (err) reject(err);
++				else resolve();
++			};
++			this.inflight.set(messageId, { settle });
++
++			ch.publish(
++				EXCHANGE_NAME,
++				eventName,
++				payload,
++				{
++					persistent: true,
++					mandatory: true,
++					contentType: "application/json",
++					messageId,
++					headers: {
++						[X_EVENT_NAME]: eventName,
++						[X_EVENT_VERSION]: eventVersion,
++					},
++				},
++				(err) => {
++					if (!this.inflight.has(messageId)) return;
++					this.inflight.delete(messageId);
++					if (err) settle(err instanceof Error ? err : new Error(String(err)));
++					else settle();
++				},
++			);
++		});
++	}
++
++	private async publishWithRetry<TData>(
++		eventName: string,
++		eventVersion: number,
++		businessId: string,
++		data: TData,
++	): Promise<void> {
++		const envelope: Envelope<TData> = {
++			eventName,
++			eventVersion,
++			occurredAt: new Date().toISOString(),
++			traceparent: undefined,
++			data,
++		};
++
++		const monitor = this.monitorFactory(
++			{ processName: "amqp-publish", businessId, stageName: eventName },
++			{ eventVersion },
++		);
++		monitor.logStarted();
++
++		let lastError: Error | undefined;
++		for (let attempt = 1; attempt <= RETRY_BACKOFFS_MS.length; attempt++) {
++			try {
++				await this.publishOnce(eventName, eventVersion, envelope);
++				monitor.logSuccess();
++				return;
++			} catch (err) {
++				lastError = err instanceof Error ? err : new Error(String(err));
++				// Reset channel on transient errors that aren't UnroutedError so next attempt is fresh.
++				if (!(lastError instanceof UnroutedError)) {
++					try {
++						await this.channel?.close();
++					} catch {}
++					this.channel = null;
++				}
++				const isLast = attempt === RETRY_BACKOFFS_MS.length;
++				if (isLast) {
++					const exhausted = new PublishExhaustedError(eventName, attempt, lastError);
++					monitor.logAborting(exhausted);
++					throw exhausted;
++				}
++				monitor.logRetry(lastError);
++				await sleep(RETRY_BACKOFFS_MS[attempt - 1]);
++			}
++		}
++
++		// Unreachable — loop always returns or throws.
++		throw new PublishExhaustedError(
++			eventName,
++			RETRY_BACKOFFS_MS.length,
++			lastError ?? new Error("unknown"),
++		);
++	}
++
++	private async publishSwallowed<TData>(
++		eventName: string,
++		eventVersion: number,
++		businessId: string,
++		data: TData,
++	): Promise<void> {
+ 		try {
+-			const ch = await this.ensureChannel();
+-			ch.publish(EXCHANGE, routingKey, payload, {
+-				persistent: true,
+-				contentType: "application/json",
+-			});
+-		} catch {
+-			this.channel = null;
+-			this.connection = null;
+-			const ch = await this.ensureChannel();
+-			ch.publish(EXCHANGE, routingKey, payload, {
+-				persistent: true,
+-				contentType: "application/json",
+-			});
++			await this.publishWithRetry(eventName, eventVersion, businessId, data);
++		} catch (err) {
++			if (err instanceof PublishExhaustedError) return;
++			throw err;
+ 		}
+ 	}
+ 
+-	async publishExportStarted(event: ExportStartedEvent): Promise<void> {
+-		await this.publish("export.started", event);
++	async publishExportStarted(data: ExportStartedData): Promise<void> {
++		await this.publishSwallowed(EXPORT_STARTED, EXPORT_STARTED_V1, data.jobId, data);
+ 	}
+ 
+-	async publishExportCompleted(event: ExportCompletedEvent): Promise<void> {
+-		await this.publish("export.completed", event);
++	async publishExportCompleted(data: ExportCompletedData): Promise<void> {
++		await this.publishSwallowed(EXPORT_COMPLETED, EXPORT_COMPLETED_V1, data.jobId, data);
+ 	}
+ 
+-	async publishExportFailed(event: ExportFailedEvent): Promise<void> {
+-		await this.publish("export.failed", event);
++	async publishExportFailed(data: ExportFailedData): Promise<void> {
++		await this.publishSwallowed(EXPORT_FAILED, EXPORT_FAILED_V1, data.jobId, data);
+ 	}
+ }
+diff --git a/apps/server/src/infrastructure/messaging/__tests__/NullExportEventPublisher.test.ts b/apps/server/src/infrastructure/messaging/__tests__/NullExportEventPublisher.test.ts
+index 08037ea..c3b874f 100644
+--- a/apps/server/src/infrastructure/messaging/__tests__/NullExportEventPublisher.test.ts
++++ b/apps/server/src/infrastructure/messaging/__tests__/NullExportEventPublisher.test.ts
+@@ -8,10 +8,11 @@ describe("NullExportEventPublisher", () => {
+ 		await expect(
+ 			publisher.publishExportStarted({
+ 				jobId: "j1",
++				mediaId: "m1",
+ 				mediaName: "test",
+ 				downloadToComputer: false,
+ 				saveToPersonalChannel: false,
+-				selectedChannelIds: [],
++				selectedUnitChannelIds: [],
+ 				exportType: "mp4",
+ 				items: [],
+ 			}),
+diff --git a/apps/server/src/infrastructure/messaging/__tests__/RabbitMQPublisher.test.ts b/apps/server/src/infrastructure/messaging/__tests__/RabbitMQPublisher.test.ts
+index cf764a5..99d7b1e 100644
+--- a/apps/server/src/infrastructure/messaging/__tests__/RabbitMQPublisher.test.ts
++++ b/apps/server/src/infrastructure/messaging/__tests__/RabbitMQPublisher.test.ts
+@@ -1,10 +1,23 @@
+ import { RabbitMQContainer } from "@testcontainers/rabbitmq";
++import {
++	EXCHANGE_NAME,
++	EXPORT_COMPLETED,
++	EXPORT_COMPLETED_V1,
++	EXPORT_FAILED,
++	EXPORT_FAILED_V1,
++	EXPORT_STARTED,
++	EXPORT_STARTED_V1,
++	X_EVENT_NAME,
++	X_EVENT_VERSION,
++} from "@video-editor/contract/events";
+ import type { ConsumeMessage } from "amqplib";
+ import { connect } from "amqplib";
+ import { afterAll, beforeAll, describe, expect, it } from "vitest";
+-import { RabbitMQPublisher } from "../RabbitMQPublisher.ts";
++import { createNoopMonitorFactory } from "../createNoopMonitorFactory.ts";
++import { RabbitMQPublisher, UnroutedError } from "../RabbitMQPublisher.ts";
++import { createRecordingMonitorFactory } from "./createRecordingMonitorFactory.ts";
+ 
+-describe("RabbitMQPublisher", { timeout: 60_000 }, () => {
++describe("RabbitMQPublisher — envelope + headers", { timeout: 60_000 }, () => {
+ 	let amqpUrl: string;
+ 	let publisher: RabbitMQPublisher;
+ 	let stopContainer: () => Promise<void>;
+@@ -12,7 +25,8 @@ describe("RabbitMQPublisher", { timeout: 60_000 }, () => {
+ 	beforeAll(async () => {
+ 		const container = await new RabbitMQContainer("rabbitmq:3-management").start();
+ 		amqpUrl = container.getAmqpUrl();
+-		publisher = new RabbitMQPublisher(amqpUrl);
++		publisher = new RabbitMQPublisher(amqpUrl, createNoopMonitorFactory());
++		await publisher.connect();
+ 		stopContainer = async () => {
+ 			await container.stop();
+ 		};
+@@ -23,9 +37,6 @@ describe("RabbitMQPublisher", { timeout: 60_000 }, () => {
+ 		await stopContainer?.();
+ 	});
+ 
+-	// Returns a function that waits for the next message on the given routingKey.
+-	// The consumer is fully registered before this function returns, so it is safe to
+-	// publish immediately after awaiting setupConsumer.
+ 	async function setupConsumer(routingKey: string): Promise<() => Promise<ConsumeMessage>> {
+ 		const conn = await connect(amqpUrl);
+ 		conn.on("error", () => {});
+@@ -33,9 +44,9 @@ describe("RabbitMQPublisher", { timeout: 60_000 }, () => {
+ 		const ch = await conn.createChannel();
+ 		ch.on("error", () => {});
+ 		ch.on("close", () => {});
+-		await ch.assertExchange("video-editor", "topic", { durable: true });
++		await ch.assertExchange(EXCHANGE_NAME, "topic", { durable: true });
+ 		const { queue } = await ch.assertQueue("", { exclusive: true });
+-		await ch.bindQueue(queue, "video-editor", routingKey);
++		await ch.bindQueue(queue, EXCHANGE_NAME, routingKey);
+ 
+ 		let resolveMsg!: (msg: ConsumeMessage) => void;
+ 		const msgPromise = new Promise<ConsumeMessage>((r) => {
+@@ -61,45 +72,228 @@ describe("RabbitMQPublisher", { timeout: 60_000 }, () => {
+ 		};
+ 	}
+ 
+-	it("publishExportStarted sends to exchange with routing key export.started", async () => {
+-		const collect = await setupConsumer("export.started");
++	it("wraps export.started payload in envelope and sets headers", async () => {
++		const collect = await setupConsumer(EXPORT_STARTED);
+ 		await publisher.publishExportStarted({
+ 			jobId: "j1",
++			mediaId: "550e8400-e29b-41d4-a716-446655440000",
+ 			mediaName: "clip",
+ 			downloadToComputer: true,
+ 			saveToPersonalChannel: false,
+-			selectedChannelIds: ["ch1"],
++			selectedUnitChannelIds: ["ch1"],
+ 			exportType: "mp4",
+-			items: [{ id: "item1" }],
++			items: [{ type: "clip", id: "media-1" }],
+ 		});
++
+ 		const msg = await collect();
+-		const content = JSON.parse(msg.content.toString()) as Record<string, unknown>;
+-		expect(msg.fields.routingKey).toBe("export.started");
+-		expect(content.jobId).toBe("j1");
+-		expect(content.mediaName).toBe("clip");
+-		expect(content.exportType).toBe("mp4");
++		const envelope = JSON.parse(msg.content.toString()) as Record<string, unknown>;
++
++		expect(msg.fields.routingKey).toBe(EXPORT_STARTED);
++		expect(envelope.eventName).toBe(EXPORT_STARTED);
++		expect(envelope.eventVersion).toBe(EXPORT_STARTED_V1);
++		expect(typeof envelope.occurredAt).toBe("string");
++		expect((envelope.data as Record<string, unknown>).jobId).toBe("j1");
++		expect((envelope.data as Record<string, unknown>).mediaName).toBe("clip");
++		expect(msg.properties.headers?.[X_EVENT_NAME]).toBe(EXPORT_STARTED);
++		expect(msg.properties.headers?.[X_EVENT_VERSION]).toBe(EXPORT_STARTED_V1);
++		expect(msg.properties.contentType).toBe("application/json");
+ 	});
+ 
+-	it("publishExportCompleted sends url and exportType", async () => {
+-		const collect = await setupConsumer("export.completed");
++	it("wraps export.completed payload in envelope and sets headers", async () => {
++		const collect = await setupConsumer(EXPORT_COMPLETED);
+ 		await publisher.publishExportCompleted({
+ 			jobId: "j2",
+ 			url: "https://s3.example.com/out.mp4",
+ 			exportType: "mp4",
+ 		});
+ 		const msg = await collect();
+-		const content = JSON.parse(msg.content.toString()) as Record<string, unknown>;
+-		expect(msg.fields.routingKey).toBe("export.completed");
+-		expect(content.jobId).toBe("j2");
+-		expect(content.url).toBe("https://s3.example.com/out.mp4");
++		const envelope = JSON.parse(msg.content.toString()) as Record<string, unknown>;
++
++		expect(envelope.eventName).toBe(EXPORT_COMPLETED);
++		expect(envelope.eventVersion).toBe(EXPORT_COMPLETED_V1);
++		expect((envelope.data as Record<string, unknown>).url).toBe("https://s3.example.com/out.mp4");
++		expect(msg.properties.headers?.[X_EVENT_NAME]).toBe(EXPORT_COMPLETED);
++		expect(msg.properties.headers?.[X_EVENT_VERSION]).toBe(EXPORT_COMPLETED_V1);
+ 	});
+ 
+-	it("publishExportFailed sends error string", async () => {
+-		const collect = await setupConsumer("export.failed");
++	it("wraps export.failed payload in envelope and sets headers", async () => {
++		const collect = await setupConsumer(EXPORT_FAILED);
+ 		await publisher.publishExportFailed({ jobId: "j3", error: "ffmpeg segfault" });
+ 		const msg = await collect();
+-		const content = JSON.parse(msg.content.toString()) as Record<string, unknown>;
+-		expect(msg.fields.routingKey).toBe("export.failed");
+-		expect(content.error).toBe("ffmpeg segfault");
++		const envelope = JSON.parse(msg.content.toString()) as Record<string, unknown>;
++
++		expect(envelope.eventName).toBe(EXPORT_FAILED);
++		expect(envelope.eventVersion).toBe(EXPORT_FAILED_V1);
++		expect((envelope.data as Record<string, unknown>).error).toBe("ffmpeg segfault");
++		expect(msg.properties.headers?.[X_EVENT_NAME]).toBe(EXPORT_FAILED);
++		expect(msg.properties.headers?.[X_EVENT_VERSION]).toBe(EXPORT_FAILED_V1);
++	});
++});
++
++describe("RabbitMQPublisher — mandatory + retry + monitor lifecycle", { timeout: 60_000 }, () => {
++	let amqpUrl: string;
++	let stopContainer: () => Promise<void>;
++
++	beforeAll(async () => {
++		const container = await new RabbitMQContainer("rabbitmq:3-management").start();
++		amqpUrl = container.getAmqpUrl();
++		stopContainer = async () => {
++			await container.stop();
++		};
++	});
++
++	afterAll(async () => {
++		await stopContainer?.();
++	});
++
++	it("retries 3 times and logs aborting with UnroutedError when no queue is bound", async () => {
++		const { factory, events } = createRecordingMonitorFactory();
++		const publisher = new RabbitMQPublisher(amqpUrl, factory);
++		await publisher.connect();
++		try {
++			// No consumer bound — broker returns the message; publisher retries 2× then aborts.
++			await publisher.publishExportFailed({ jobId: "no-bind", error: "n/a" });
++		} finally {
++			await publisher.close();
++		}
++
++		const started = events.filter((e) => e.type === "started");
++		const retries = events.filter((e) => e.type === "retry");
++		const aborting = events.filter((e) => e.type === "aborting");
++		const success = events.filter((e) => e.type === "success");
++
++		expect(started).toHaveLength(1);
++		expect(retries).toHaveLength(2);
++		expect(success).toHaveLength(0);
++		expect(aborting).toHaveLength(1);
++
++		for (const r of retries) {
++			expect(r.type === "retry" && r.error instanceof UnroutedError).toBe(true);
++		}
++		expect(aborting[0].type === "aborting" && /UnroutedError/.test(aborting[0].error.message)).toBe(
++			false,
++		);
++		// Aborting receives PublishExhaustedError whose .cause is the UnroutedError.
++		expect(aborting[0].type === "aborting" && aborting[0].error.name).toBe("PublishExhaustedError");
++	});
++
++	it("does not rethrow PublishExhaustedError to the caller (controller never sees it)", async () => {
++		const { factory } = createRecordingMonitorFactory();
++		const publisher = new RabbitMQPublisher(amqpUrl, factory);
++		await publisher.connect();
++		try {
++			await expect(
++				publisher.publishExportFailed({ jobId: "swallow", error: "n/a" }),
++			).resolves.toBeUndefined();
++		} finally {
++			await publisher.close();
++		}
++	});
++});
++
++describe("RabbitMQPublisher — connect fail-fast", () => {
++	it("connect() throws when broker is unreachable", async () => {
++		const publisher = new RabbitMQPublisher("amqp://127.0.0.1:1", createNoopMonitorFactory());
++		await expect(publisher.connect()).rejects.toThrow();
++	});
++});
++
++describe("RabbitMQPublisher — drain", { timeout: 60_000 }, () => {
++	let amqpUrl: string;
++	let stopContainer: () => Promise<void>;
++
++	beforeAll(async () => {
++		const container = await new RabbitMQContainer("rabbitmq:3-management").start();
++		amqpUrl = container.getAmqpUrl();
++		stopContainer = async () => {
++			await container.stop();
++		};
++	});
++
++	afterAll(async () => {
++		await stopContainer?.();
++	});
++
++	it("drain returns quickly when no publishes are in-flight", async () => {
++		const { factory } = createRecordingMonitorFactory();
++		const publisher = new RabbitMQPublisher(amqpUrl, factory);
++		await publisher.connect();
++		const start = Date.now();
++		await publisher.drain(5_000);
++		const elapsed = Date.now() - start;
++		expect(elapsed).toBeLessThan(200);
++		await publisher.close();
++	});
++
++	it("drain times out when inflight messages never confirm and returns within budget", async () => {
++		const { factory } = createRecordingMonitorFactory();
++		const publisher = new RabbitMQPublisher(amqpUrl, factory);
++		await publisher.connect();
++
++		// Inject a fake inflight entry that will never resolve.
++		const internal = publisher as unknown as { inflight: Map<string, { settle: () => void }> };
++		internal.inflight.set("stuck-id", { settle: () => {} });
++
++		const start = Date.now();
++		await publisher.drain(200);
++		const elapsed = Date.now() - start;
++		expect(elapsed).toBeGreaterThanOrEqual(200);
++		expect(elapsed).toBeLessThan(600);
++
++		internal.inflight.clear();
++		await publisher.close();
++	});
++});
++
++describe("RabbitMQPublisher — background reconnect", { timeout: 60_000 }, () => {
++	let amqpUrl: string;
++	let stopContainer: () => Promise<void>;
++
++	beforeAll(async () => {
++		const container = await new RabbitMQContainer("rabbitmq:3-management").start();
++		amqpUrl = container.getAmqpUrl();
++		stopContainer = async () => {
++			await container.stop();
++		};
++	});
++
++	afterAll(async () => {
++		await stopContainer?.();
++	});
++
++	it("starts reconnect loop on connection close and logs success when broker still reachable", async () => {
++		const { factory, events } = createRecordingMonitorFactory();
++		const publisher = new RabbitMQPublisher(amqpUrl, factory);
++		await publisher.connect();
++
++		// Force-close the underlying connection (broker still alive); reconnect loop should kick in.
++		const internal = publisher as unknown as { connection: { close: () => Promise<void> } | null };
++		await internal.connection?.close();
++
++		// Wait a beat for reconnect loop to run.
++		await new Promise((r) => setTimeout(r, 500));
++
++		const reconnectEvents = events.filter((e) => e.config.stageName === "reconnect");
++		expect(reconnectEvents.some((e) => e.type === "started")).toBe(true);
++		expect(reconnectEvents.some((e) => e.type === "success")).toBe(true);
++
++		await publisher.close();
++	});
++
++	it("close() during reconnect loop stops further attempts", async () => {
++		const { factory, events } = createRecordingMonitorFactory();
++		// Bad URL → connect throws (fail-fast); we cannot start the loop via connect().
++		// Simulate: connect to good broker, then close it externally, then immediately
++		// publisher.close() — loop should not keep spinning.
++		const publisher = new RabbitMQPublisher(amqpUrl, factory);
++		await publisher.connect();
++		const internal = publisher as unknown as { connection: { close: () => Promise<void> } | null };
++		await internal.connection?.close();
++		await publisher.close();
++
++		await new Promise((r) => setTimeout(r, 200));
++		const eventsAfterClose = events.length;
++		await new Promise((r) => setTimeout(r, 300));
++		expect(events.length).toBe(eventsAfterClose);
+ 	});
+ });
+diff --git a/biome.json b/biome.json
+index 572b150..77e2c35 100644
+--- a/biome.json
++++ b/biome.json
+@@ -118,7 +118,7 @@
+ 			}
+ 		},
+ 		{
+-			"includes": ["packages/*/src/index.ts"],
++			"includes": ["packages/*/src/index.ts", "packages/*/src/*/index.ts"],
+ 			"linter": {
+ 				"rules": {
+ 					"performance": {
+diff --git a/knip.json b/knip.json
+index e87f5d2..4337a59 100644
+--- a/knip.json
++++ b/knip.json
+@@ -23,7 +23,7 @@
+       "entry": [],
+       "project": ["src/**/*.ts"]
+     },
+-    "packages/editor-contract": {
++    "packages/contract": {
+       "entry": [],
+       "project": ["src/**/*.ts"]
+     }
+diff --git a/packages/editor-contract/CLAUDE.md b/packages/editor-contract/CLAUDE.md
+deleted file mode 100644
+index ba9a0c9..0000000
+--- a/packages/editor-contract/CLAUDE.md
++++ /dev/null
+@@ -1,63 +0,0 @@
+-# editor-contract Package
+-
+-> **Closed network deployment:** This package is consumed by apps running in air-gapped environments. It contains no runtime network calls — purely type definitions and Zod schemas.
+->
+-> **Keep this file updated:** Update whenever message types, schemas, or exports change.
+-
+-Published as `@video-editor/iframe-contract`. Defines Zod schemas and TypeScript types for the postMessage protocol between the editor iframe and its parent page.
+-
+-## Commands
+-
+-```bash
+-pnpm build        # tsc -p tsconfig.json (required before test)
+-pnpm test         # pnpm build && node --test dist/**/*.test.js
+-pnpm type-check   # tsc -p tsconfig.json --noEmit
+-pnpm lint         # biome check .
+-pnpm format       # biome format . --write
+-```
+-
+-## Source Structure
+-
+-```
+-src/
+-├── index.ts         # Main export
+-├── messages.ts      # Message type definitions
+-├── payloads.ts      # Payload interfaces
+-├── schemas.ts       # Zod validation schemas
+-├── helpers.ts       # Factory functions
+-├── helpers.test.ts  # Test suite
+-└── mocks.ts         # Mock fixtures for testing
+-```
+-
+-## Key Exports
+-
+-**Schemas:**
+-- `parentToEditorMessageSchema` — Zod schema for messages the editor receives
+-
+-**Types:**
+-- `ParentToEditorMessage`, `EditorToParentMessage` and subtypes
+-- `PreviewItemPayload` — union of `recording-range`, `media`, `audio-range` payload shapes
+-- `EditorReadyMessage` (`type: "EDITOR_READY"`) — sent by editor to parent on init
+-- `EditorMediaSavedMessage` (`type: "EDITOR_MEDIA_SAVED"`) — sent after user confirms save form; includes `mediaName`, `downloadToComputer`, `saveToPersonalChannel`, `url`, `exportType`, `items`
+-- `SavedMediaItem` — discriminated union for items in the saved media (`image`, `clip`, `recording`, `audio`)
+-
+-**Factories:**
+-- `createPreviewItemAddedMessage`
+-- `createPreviewItemRejectedMessage`
+-- `createProjectClearedMessage`
+-- `createMediaSavedMessage`
+-
+-## Package Exports
+-
+-```json
+-"exports": {
+-  ".":       "./dist/index.js",
+-  "./mocks": "./dist/mocks.js"
+-}
+-```
+-
+-`src/` is used directly in dev via `exports` field — no separate build needed for workspace consumers.
+-
+-## Dependencies
+-
+-- `zod` v4 — runtime validation
+diff --git a/packages/editor-contract/README.md b/packages/editor-contract/README.md
+deleted file mode 100644
+index 9dc66e2..0000000
+--- a/packages/editor-contract/README.md
++++ /dev/null
+@@ -1,121 +0,0 @@
+-# editor-contract — `@video-editor/iframe-contract`
+-
+-Shared postMessage protocol for the video editor's iframe integration. Provides Zod schemas, TypeScript types, and factory functions for typed communication between the editor iframe and any host page.
+-
+-## Installation
+-
+-This package is a workspace dependency. In the monorepo, reference it directly:
+-
+-```json
+-{
+-  "dependencies": {
+-    "@video-editor/iframe-contract": "workspace:*"
+-  }
+-}
+-```
+-
+-## Commands
+-
+-```bash
+-pnpm build        # tsc (required before running tests)
+-pnpm test         # pnpm build && node --test dist/**/*.test.js
+-pnpm type-check   # tsc --noEmit
+-pnpm lint         # Biome check
+-pnpm format       # Biome format
+-```
+-
+-## Protocol Overview
+-
+-```
+-Host page                        Editor iframe (at /editor/embed)
+-─────────────────────────────────────────────────────────────────
+-                                 ──EDITOR_READY──────────────────▶
+-◀── EDITOR_ADD_PREVIEW_ITEM ─────
+-         ─────────────── preview_item_added / preview_item_rejected ──▶
+-◀── EDITOR_CLEAR_PROJECT ────────
+-         ─────────────────────────────────── project_cleared ──────▶
+-```
+-
+-## API
+-
+-### Schemas
+-
+-```ts
+-import { parentToEditorMessageSchema } from '@video-editor/iframe-contract';
+-
+-// Validates messages received by the editor
+-const message = parentToEditorMessageSchema.parse(event.data);
+-```
+-
+-### Types
+-
+-```ts
+-import type {
+-  ParentToEditorMessage,
+-  EditorToParentMessage,
+-  PreviewItemPayload,
+-  EditorReadyMessage,
+-} from '@video-editor/iframe-contract';
+-```
+-
+-`PreviewItemPayload` is a discriminated union of three shapes:
+-
+-| `kind` | Description |
+-|---|---|
+-| `recording-range` | A recording segment with time range |
+-| `media` | A generic media asset |
+-| `audio-range` | An audio segment with time range |
+-
+-### Factory Functions
+-
+-```ts
+-import {
+-  createPreviewItemAddedMessage,
+-  createPreviewItemRejectedMessage,
+-  createProjectClearedMessage,
+-} from '@video-editor/iframe-contract';
+-
+-// Build typed response messages to send from the editor back to the host
+-const response = createPreviewItemAddedMessage({ ... });
+-window.parent.postMessage(response, targetOrigin);
+-```
+-
+-### Mock Fixtures
+-
+-```ts
+-import { ... } from '@video-editor/iframe-contract/mocks';
+-```
+-
+-Available as a separate export to keep test helpers out of production bundles.
+-
+-## Source Structure
+-
+-```
+-src/
+-├── index.ts         # Main export
+-├── messages.ts      # Message type definitions
+-├── payloads.ts      # Payload interfaces
+-├── schemas.ts       # Zod validation schemas
+-├── helpers.ts       # Factory functions
+-├── helpers.test.ts  # Test suite
+-└── mocks.ts         # Mock fixtures
+-```
+-
+-## Package Exports
+-
+-```json
+-{
+-  "exports": {
+-    ".":       "./dist/index.js",
+-    "./mocks": "./dist/mocks.js"
+-  }
+-}
+-```
+-
+-`src/` is available directly for workspace consumers during development — no build step required for the monorepo.
+-
+-## Dependencies
+-
+-| Package | Purpose |
+-|---|---|
+-| `zod` v4 | Runtime schema validation and type inference |
+diff --git a/packages/editor-contract/package.json b/packages/editor-contract/package.json
+deleted file mode 100644
+index 7e4dc42..0000000
+--- a/packages/editor-contract/package.json
++++ /dev/null
+@@ -1,36 +0,0 @@
+-{
+-	"name": "@video-editor/iframe-contract",
+-	"version": "0.1.0",
+-	"private": true,
+-	"type": "module",
+-	"main": "./dist/index.js",
+-	"types": "./dist/index.d.ts",
+-	"exports": {
+-		".": {
+-			"types": "./dist/index.d.ts",
+-			"import": "./dist/index.js",
+-			"default": "./dist/index.js"
+-		},
+-		"./mocks": {
+-			"types": "./dist/mocks.d.ts",
+-			"import": "./dist/mocks.js",
+-			"default": "./dist/mocks.js"
+-		}
+-	},
+-	"files": [
+-		"dist"
+-	],
+-	"scripts": {
+-		"build": "tsc -p tsconfig.json",
+-		"type-check": "tsc -p tsconfig.json --noEmit",
+-		"test": "pnpm build && node --test dist/**/*.test.js",
+-		"lint": "biome check . --write"
+-	},
+-	"dependencies": {
+-		"zod": "catalog:"
+-	},
+-	"devDependencies": {
+-		"@types/node": "catalog:",
+-		"typescript": "catalog:"
+-	}
+-}
+diff --git a/packages/editor-contract/src/__tests__/helpers.test.ts b/packages/editor-contract/src/__tests__/helpers.test.ts
+deleted file mode 100644
+index 6876919..0000000
+--- a/packages/editor-contract/src/__tests__/helpers.test.ts
++++ /dev/null
+@@ -1,377 +0,0 @@
+-import assert from "node:assert/strict";
+-import { describe, it } from "node:test";
+-import {
+-	createPreviewItemAddedMessage,
+-	createPreviewItemRejectedMessage,
+-	createProjectClearedMessage,
+-	isParentToEditorMessage,
+-	parseParentToEditorMessage,
+-} from "../helpers.js";
+-import {
+-	mockAudioRangeMessage,
+-	mockClearProjectMessage,
+-	mockMediaHlsMessage,
+-	mockMediaMp4Message,
+-	mockRecordingRangeHlsMessage,
+-	mockRecordingRangeNoPlaybackMessage,
+-} from "../mocks.js";
+-import { editorToParentMessageSchema, parentToEditorMessageSchema } from "../schemas.js";
+-
+-const baseRecordingPayload = {
+-	kind: "recording-range" as const,
+-	channelId: "20574",
+-	startTimeMs: 1000,
+-	endTimeMs: 2000,
+-	durationMs: 1000,
+-	playback: { kind: "hls" as const, src: "https://example.com/index.m3u8" },
+-};
+-
+-const baseAudioPayload = {
+-	kind: "audio-range" as const,
+-	audioId: "a1",
+-	startTimeMs: 1000,
+-	endTimeMs: 2000,
+-	durationMs: 1000,
+-	playback: { kind: "audio" as const, src: "https://example.com/track.m4a" },
+-};
+-
+-const MAX_MS = 1000 * 60 * 60; // 1 hour
+-
+-describe("iframe contract schemas — business rules (new refines)", () => {
+-	it("rejects unsafe (non-http/https) src in hls playback", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				...baseRecordingPayload,
+-				playback: { kind: "hls", src: "file:///etc/passwd" },
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+-	it("rejects non-http/https src in media playback", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				kind: "media",
+-				mediaId: "m-1",
+-				playback: { kind: "mp4", src: "javascript:alert(1)" },
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+-	it("rejects recording-range durationMs exceeding 1 hour", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				...baseRecordingPayload,
+-				durationMs: MAX_MS + 1,
+-				endTimeMs: baseRecordingPayload.startTimeMs + MAX_MS + 1,
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+-	it("accepts recording-range durationMs exactly at the 1-hour cap", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				...baseRecordingPayload,
+-				durationMs: MAX_MS,
+-				endTimeMs: baseRecordingPayload.startTimeMs + MAX_MS,
+-			},
+-		});
+-		assert.equal(result.success, true);
+-	});
+-
+-	it("rejects audio-range durationMs exceeding 1 hour", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				...baseAudioPayload,
+-				durationMs: MAX_MS + 1,
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+-	it("rejects media durationMs exceeding 1 hour", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				kind: "media",
+-				mediaId: "m-1",
+-				durationMs: MAX_MS + 1,
+-				playback: { kind: "mp4", src: "https://example.com/v.mp4" },
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+-	it("rejects audio-range with non-hls src that is not audio media", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				...baseAudioPayload,
+-				playback: { kind: "audio", src: "https://example.com/track.mp4" },
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+-	it("accepts audio-range with hls src that looks like video", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				...baseAudioPayload,
+-				playback: { kind: "hls", src: "https://example.com/video.m3u8" },
+-			},
+-		});
+-		assert.equal(result.success, true);
+-	});
+-});
+-
+-describe("iframe contract schemas", () => {
+-	it("parses valid add-preview-item messages", () => {
+-		assert.equal(parentToEditorMessageSchema.safeParse(mockRecordingRangeHlsMessage).success, true);
+-		assert.equal(parentToEditorMessageSchema.safeParse(mockMediaMp4Message).success, true);
+-		assert.equal(parentToEditorMessageSchema.safeParse(mockMediaHlsMessage).success, true);
+-		assert.equal(parentToEditorMessageSchema.safeParse(mockAudioRangeMessage).success, true);
+-	});
+-
+-	it("accepts recording-range without playback (editor resolves HLS URL)", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse(mockRecordingRangeNoPlaybackMessage).success,
+-			true,
+-		);
+-	});
+-
+-	it("parses valid clear-project messages", () => {
+-		assert.equal(parentToEditorMessageSchema.safeParse(mockClearProjectMessage).success, true);
+-	});
+-
+-	it("rejects invalid message shapes", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				requestId: "bad",
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects durationMs = 0 for recording-range", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: { ...baseRecordingPayload, durationMs: 0 },
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects durationMs = 0 for audio-range", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: { ...baseAudioPayload, durationMs: 0 },
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects endTimeMs < startTimeMs for recording-range", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: { ...baseRecordingPayload, startTimeMs: 100, endTimeMs: 99 },
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects endTimeMs === startTimeMs (zero duration range) for recording-range", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: { ...baseRecordingPayload, startTimeMs: 100, endTimeMs: 100 },
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects endTimeMs === startTimeMs for audio-range", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: { ...baseAudioPayload, startTimeMs: 100, endTimeMs: 100 },
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("accepts sourceOffsetMs = 0 (valid boundary)", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: { ...baseRecordingPayload, sourceOffsetMs: 0 },
+-			}).success,
+-			true,
+-		);
+-	});
+-
+-	it("rejects sourceOffsetMs > durationMs", () => {
+-		assert.equal(
+-			parentToEditorMessageSchema.safeParse({
+-				type: "EDITOR_ADD_PREVIEW_ITEM",
+-				payload: {
+-					...baseRecordingPayload,
+-					durationMs: 1000,
+-					sourceOffsetMs: 1001,
+-				},
+-			}).success,
+-			false,
+-		);
+-	});
+-});
+-
+-describe("editorMediaSavedMessageSchema", () => {
+-	const validMsg = {
+-		type: "EDITOR_MEDIA_SAVED",
+-		mediaId: "550e8400-e29b-41d4-a716-446655440000",
+-		mediaName: "My Clip",
+-		downloadToComputer: true,
+-		saveToPersonalChannel: false,
+-		selectedUnitChannelIds: [],
+-		url: "https://example.com/output/video.mp4",
+-		exportType: "mp4",
+-		items: [
+-			{ type: "recording", id: "ch-1", from: 0, to: 5000 },
+-			{ type: "audio", id: "aud-1", from: 1000, to: 4000 },
+-			{ type: "image", id: "img-1" },
+-			{ type: "clip", id: "media-1" },
+-		],
+-	};
+-
+-	it("accepts a valid EDITOR_MEDIA_SAVED message", () => {
+-		assert.equal(editorToParentMessageSchema.safeParse(validMsg).success, true);
+-	});
+-
+-	it("rejects missing mediaName", () => {
+-		const { mediaName: _m, ...rest } = validMsg;
+-		assert.equal(editorToParentMessageSchema.safeParse(rest).success, false);
+-	});
+-
+-	it("rejects non-http url", () => {
+-		assert.equal(
+-			editorToParentMessageSchema.safeParse({ ...validMsg, url: "ftp://bad.com/x.mp4" }).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects unknown exportType", () => {
+-		assert.equal(
+-			editorToParentMessageSchema.safeParse({ ...validMsg, exportType: "json" }).success,
+-			false,
+-		);
+-	});
+-
+-	it("rejects recording item missing from/to", () => {
+-		assert.equal(
+-			editorToParentMessageSchema.safeParse({
+-				...validMsg,
+-				items: [{ type: "recording", id: "ch-1" }],
+-			}).success,
+-			false,
+-		);
+-	});
+-
+-	it("accepts empty items array", () => {
+-		assert.equal(editorToParentMessageSchema.safeParse({ ...validMsg, items: [] }).success, true);
+-	});
+-
+-	it("rejects EDITOR_MEDIA_SAVED without mediaId", () => {
+-		const { mediaId: _m, ...withoutMediaId } = validMsg as typeof validMsg & { mediaId: string };
+-		assert.equal(editorToParentMessageSchema.safeParse(withoutMediaId).success, false);
+-	});
+-
+-	it("rejects EDITOR_MEDIA_SAVED without selectedUnitChannelIds", () => {
+-		const { selectedUnitChannelIds: _s, ...withoutChannels } = validMsg as typeof validMsg & {
+-			selectedUnitChannelIds: string[];
+-		};
+-		assert.equal(editorToParentMessageSchema.safeParse(withoutChannels).success, false);
+-	});
+-
+-	it("accepts EDITOR_MEDIA_SAVED with mediaId and selectedUnitChannelIds", () => {
+-		assert.equal(
+-			editorToParentMessageSchema.safeParse({
+-				...validMsg,
+-				mediaId: "550e8400-e29b-41d4-a716-446655440000",
+-				selectedUnitChannelIds: ["ch-1", "ch-2"],
+-			}).success,
+-			true,
+-		);
+-	});
+-
+-	it("accepts EDITOR_MEDIA_SAVED with empty selectedUnitChannelIds", () => {
+-		assert.equal(
+-			editorToParentMessageSchema.safeParse({
+-				...validMsg,
+-				mediaId: "550e8400-e29b-41d4-a716-446655440000",
+-				selectedUnitChannelIds: [],
+-			}).success,
+-			true,
+-		);
+-	});
+-});
+-
+-describe("iframe contract helpers", () => {
+-	it("detects valid parent-to-editor messages", () => {
+-		assert.equal(isParentToEditorMessage(mockMediaMp4Message), true);
+-		assert.equal(isParentToEditorMessage({ type: "UNKNOWN" }), false);
+-	});
+-
+-	it("parses valid parent-to-editor messages", () => {
+-		const parsed = parseParentToEditorMessage(mockMediaHlsMessage);
+-		assert.equal(parsed.type, "EDITOR_ADD_PREVIEW_ITEM");
+-		if (parsed.type !== "EDITOR_ADD_PREVIEW_ITEM") {
+-			assert.fail("Expected an add-preview-item message");
+-		}
+-		assert.equal(parsed.payload.kind, "media");
+-	});
+-
+-	it("creates response messages with the expected shapes", () => {
+-		assert.deepEqual(createPreviewItemAddedMessage("item-1", "req-1"), {
+-			type: "EDITOR_PREVIEW_ITEM_ADDED",
+-			requestId: "req-1",
+-			itemId: "item-1",
+-		});
+-		assert.deepEqual(createPreviewItemRejectedMessage("bad request", "req-2"), {
+-			type: "EDITOR_PREVIEW_ITEM_REJECTED",
+-			requestId: "req-2",
+-			reason: "bad request",
+-		});
+-		assert.deepEqual(createProjectClearedMessage("req-3"), {
+-			type: "EDITOR_PROJECT_CLEARED",
+-			requestId: "req-3",
+-		});
+-	});
+-
+-	it("keeps all exported mocks schema-valid", () => {
+-		for (const message of [
+-			mockRecordingRangeHlsMessage,
+-			mockRecordingRangeNoPlaybackMessage,
+-			mockMediaMp4Message,
+-			mockMediaHlsMessage,
+-			mockAudioRangeMessage,
+-			mockClearProjectMessage,
+-		]) {
+-			assert.equal(
+-				parentToEditorMessageSchema.safeParse(message).success,
+-				true,
+-				`Mock failed schema validation: ${JSON.stringify(message)}`,
+-			);
+-		}
+-	});
+-});
+diff --git a/packages/editor-contract/src/helpers.ts b/packages/editor-contract/src/helpers.ts
+deleted file mode 100644
+index 294c180..0000000
+--- a/packages/editor-contract/src/helpers.ts
++++ /dev/null
+@@ -1,60 +0,0 @@
+-import type {
+-	EditorMediaSavedMessage,
+-	EditorPreviewItemAddedMessage,
+-	EditorPreviewItemRejectedMessage,
+-	EditorProjectClearedMessage,
+-	ParentToEditorMessage,
+-	SavedMediaItem,
+-} from "./messages.js";
+-
+-import { parentToEditorMessageSchema } from "./schemas.js";
+-
+-export const isParentToEditorMessage = (value: unknown): value is ParentToEditorMessage =>
+-	parentToEditorMessageSchema.safeParse(value).success;
+-
+-export const parseParentToEditorMessage = (value: unknown): ParentToEditorMessage =>
+-	parentToEditorMessageSchema.parse(value);
+-
+-export const createPreviewItemAddedMessage = (
+-	itemId: string,
+-	requestId?: string,
+-): EditorPreviewItemAddedMessage => ({
+-	type: "EDITOR_PREVIEW_ITEM_ADDED",
+-	requestId,
+-	itemId,
+-});
+-
+-export const createPreviewItemRejectedMessage = (
+-	reason: string,
+-	requestId?: string,
+-): EditorPreviewItemRejectedMessage => ({
+-	type: "EDITOR_PREVIEW_ITEM_REJECTED",
+-	requestId,
+-	reason,
+-});
+-
+-export const createProjectClearedMessage = (requestId?: string): EditorProjectClearedMessage => ({
+-	type: "EDITOR_PROJECT_CLEARED",
+-	requestId,
+-});
+-
+-export const createMediaSavedMessage = (
+-	mediaName: string,
+-	downloadToComputer: boolean,
+-	saveToPersonalChannel: boolean,
+-	url: string,
+-	exportType: "mp4" | "webp",
+-	items: SavedMediaItem[],
+-	mediaId: string,
+-	selectedUnitChannelIds: string[],
+-): EditorMediaSavedMessage => ({
+-	type: "EDITOR_MEDIA_SAVED",
+-	mediaId,
+-	mediaName,
+-	downloadToComputer,
+-	saveToPersonalChannel,
+-	selectedUnitChannelIds,
+-	url,
+-	exportType,
+-	items,
+-});
+diff --git a/packages/editor-contract/src/index.ts b/packages/editor-contract/src/index.ts
+deleted file mode 100644
+index 634326d..0000000
+--- a/packages/editor-contract/src/index.ts
++++ /dev/null
+@@ -1,4 +0,0 @@
+-export * from "./helpers.js";
+-export * from "./messages.js";
+-export * from "./payloads.js";
+-export * from "./schemas.js";
+diff --git a/packages/editor-contract/src/messages.ts b/packages/editor-contract/src/messages.ts
+deleted file mode 100644
+index 2be13b4..0000000
+--- a/packages/editor-contract/src/messages.ts
++++ /dev/null
+@@ -1,68 +0,0 @@
+-import type { PreviewItemPayload } from "./payloads.js";
+-
+-export type EditorAddPreviewItemMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM";
+-	requestId?: string;
+-	payload: PreviewItemPayload;
+-};
+-
+-export type EditorClearProjectMessage = {
+-	type: "EDITOR_CLEAR_PROJECT";
+-	requestId?: string;
+-};
+-
+-export type EditorSetAuthMessage = {
+-	type: "EDITOR_SET_AUTH";
+-	token: string;
+-};
+-
+-export type ParentToEditorMessage =
+-	| EditorAddPreviewItemMessage
+-	| EditorClearProjectMessage
+-	| EditorSetAuthMessage;
+-
+-export type EditorPreviewItemAddedMessage = {
+-	type: "EDITOR_PREVIEW_ITEM_ADDED";
+-	requestId?: string;
+-	itemId: string;
+-};
+-
+-export type EditorPreviewItemRejectedMessage = {
+-	type: "EDITOR_PREVIEW_ITEM_REJECTED";
+-	requestId?: string;
+-	reason: string;
+-};
+-
+-export type EditorProjectClearedMessage = {
+-	type: "EDITOR_PROJECT_CLEARED";
+-	requestId?: string;
+-};
+-
+-export type EditorReadyMessage = {
+-	type: "EDITOR_READY";
+-};
+-
+-export type SavedMediaItem =
+-	| { type: "image"; id: string }
+-	| { type: "clip"; id: string }
+-	| { type: "recording"; id: string; from: number; to: number }
+-	| { type: "audio"; id: string; from: number; to: number };
+-
+-export type EditorMediaSavedMessage = {
+-	type: "EDITOR_MEDIA_SAVED";
+-	mediaId: string;
+-	mediaName: string;
+-	downloadToComputer: boolean;
+-	saveToPersonalChannel: boolean;
+-	selectedUnitChannelIds: string[];
+-	url: string;
+-	exportType: "mp4" | "webp";
+-	items: SavedMediaItem[];
+-};
+-
+-export type EditorToParentMessage =
+-	| EditorPreviewItemAddedMessage
+-	| EditorPreviewItemRejectedMessage
+-	| EditorProjectClearedMessage
+-	| EditorReadyMessage
+-	| EditorMediaSavedMessage;
+diff --git a/packages/editor-contract/src/mocks.ts b/packages/editor-contract/src/mocks.ts
+deleted file mode 100644
+index c7a7da5..0000000
+--- a/packages/editor-contract/src/mocks.ts
++++ /dev/null
+@@ -1,109 +0,0 @@
+-import type {
+-	EditorClearProjectMessage,
+-	EditorMediaSavedMessage,
+-	ParentToEditorMessage,
+-} from "./messages.js";
+-
+-const mockStartTimeMs = 1778412276333;
+-const mockEndTimeMs = 1778412813617;
+-const mockDurationMs = mockEndTimeMs - mockStartTimeMs;
+-
+-export const mockRecordingRangeHlsMessage: ParentToEditorMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM",
+-	requestId: "mock-recording-range-hls",
+-	payload: {
+-		kind: "recording-range",
+-		channelId: "20574",
+-		startTimeMs: mockStartTimeMs,
+-		endTimeMs: mockEndTimeMs,
+-		durationMs: mockDurationMs,
+-		playback: {
+-			kind: "hls",
+-			src: "https://example.com/api/editor/hls-preview/jobs/mock-recording/index.m3u8",
+-		},
+-		sourceOffsetMs: 6333,
+-		posterSrc: "https://example.com/mock-recording-poster.jpg",
+-	},
+-};
+-
+-export const mockMediaMp4Message: ParentToEditorMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM",
+-	requestId: "mock-media-mp4",
+-	payload: {
+-		kind: "media",
+-		mediaId: "media-1001",
+-		durationMs: 120000,
+-		playback: {
+-			kind: "mp4",
+-			src: "https://example.com/media/mock-video.mp4",
+-		},
+-		posterSrc: "https://example.com/media/mock-video-poster.jpg",
+-	},
+-};
+-
+-export const mockMediaHlsMessage: ParentToEditorMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM",
+-	requestId: "mock-media-hls",
+-	payload: {
+-		kind: "media",
+-		mediaId: "media-1002",
+-		durationMs: 180000,
+-		playback: {
+-			kind: "hls",
+-			src: "https://example.com/media/mock-video/index.m3u8",
+-		},
+-		posterSrc: "https://example.com/media/mock-video-hls-poster.jpg",
+-	},
+-};
+-
+-export const mockAudioRangeMessage: ParentToEditorMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM",
+-	requestId: "mock-audio-range",
+-	payload: {
+-		kind: "audio-range",
+-		audioId: "audio-501",
+-		startTimeMs: mockStartTimeMs,
+-		endTimeMs: mockEndTimeMs,
+-		durationMs: mockDurationMs,
+-		playback: {
+-			kind: "audio",
+-			src: "https://example.com/audio/mock-track.m4a",
+-		},
+-		sourceOffsetMs: 6333,
+-	},
+-};
+-
+-export const mockRecordingRangeNoPlaybackMessage: ParentToEditorMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM",
+-	requestId: "mock-recording-range-no-playback",
+-	payload: {
+-		kind: "recording-range",
+-		channelId: "20574",
+-		startTimeMs: mockStartTimeMs,
+-		endTimeMs: mockEndTimeMs,
+-		durationMs: mockDurationMs,
+-		sourceOffsetMs: 6333,
+-	},
+-};
+-
+-export const mockClearProjectMessage: EditorClearProjectMessage = {
+-	type: "EDITOR_CLEAR_PROJECT",
+-	requestId: "mock-clear-project",
+-};
+-
+-export const mockMediaSavedMessage: EditorMediaSavedMessage = {
+-	type: "EDITOR_MEDIA_SAVED",
+-	mediaId: "550e8400-e29b-41d4-a716-446655440000",
+-	mediaName: "My Edited Clip",
+-	downloadToComputer: true,
+-	saveToPersonalChannel: false,
+-	selectedUnitChannelIds: [],
+-	url: "https://example.com/output/mock-video.mp4",
+-	exportType: "mp4",
+-	items: [
+-		{ type: "recording", id: "20574", from: 0, to: 537284 },
+-		{ type: "audio", id: "audio-501", from: 0, to: 537284 },
+-		{ type: "image", id: "img-item-1" },
+-		{ type: "clip", id: "media-1001" },
+-	],
+-};
+diff --git a/packages/editor-contract/src/payloads.ts b/packages/editor-contract/src/payloads.ts
+deleted file mode 100644
+index 5552346..0000000
+--- a/packages/editor-contract/src/payloads.ts
++++ /dev/null
+@@ -1,55 +0,0 @@
+-export type HlsPlayback = {
+-	kind: "hls";
+-	src: string;
+-};
+-
+-export type MediaPlayback = {
+-	kind: "mp4" | "hls";
+-	src: string;
+-};
+-
+-export type AudioPlayback = {
+-	kind: "audio" | "hls";
+-	src: string;
+-};
+-
+-export type Playback = HlsPlayback | MediaPlayback | AudioPlayback;
+-
+-export const DEMO_PREVIEW_CHANNEL_ID = "demo-recording";
+-export const DEMO_PREVIEW_SEGMENT_START_MS = 1778412270000;
+-export const DEMO_PREVIEW_DEFAULT_END_MS = DEMO_PREVIEW_SEGMENT_START_MS + 30000;
+-
+-export type RecordingRangePayload = {
+-	kind: "recording-range";
+-	channelId: string;
+-	startTimeMs: number;
+-	endTimeMs: number;
+-	durationMs: number;
+-	/** When absent, the editor resolves the HLS playlist URL via POST /api/editor/preview-source. */
+-	playback?: HlsPlayback;
+-	sourceOffsetMs?: number;
+-	posterSrc?: string;
+-	name?: string;
+-};
+-
+-export type MediaPayload = {
+-	kind: "media";
+-	mediaId: string;
+-	durationMs?: number;
+-	playback: MediaPlayback;
+-	posterSrc?: string;
+-	name?: string;
+-};
+-
+-export type AudioRangePayload = {
+-	kind: "audio-range";
+-	audioId: string;
+-	startTimeMs?: number;
+-	endTimeMs?: number;
+-	durationMs: number;
+-	playback: AudioPlayback;
+-	sourceOffsetMs?: number;
+-	name?: string;
+-};
+-
+-export type PreviewItemPayload = RecordingRangePayload | MediaPayload | AudioRangePayload;
+diff --git a/packages/editor-contract/src/schemas.ts b/packages/editor-contract/src/schemas.ts
+deleted file mode 100644
+index 6e07cf5..0000000
+--- a/packages/editor-contract/src/schemas.ts
++++ /dev/null
+@@ -1,203 +0,0 @@
+-import { z } from "zod";
+-
+-export const MAX_PREVIEW_DURATION_MS = 1000 * 60 * 60 * 1;
+-
+-const positiveNumber = z.number().finite().min(0);
+-const positiveDuration = z.number().finite().positive();
+-const nonEmptyString = z.string().trim().min(1);
+-const requestIdSchema = z.string().trim().min(1).optional();
+-
+-const safeMediaUrl = (src: string) => /^https?:\/\//i.test(src);
+-const likelyAudioSrc = (src: string) => /\.(m3u8|mp3|wav|m4a|aac|ogg)(\?|$)/i.test(src);
+-const safeSrc = nonEmptyString.refine(safeMediaUrl, {
+-	message: "src must be an http/https URL",
+-});
+-
+-export const hlsPlaybackSchema = z.strictObject({
+-	kind: z.literal("hls"),
+-	src: safeSrc,
+-});
+-
+-export const mediaPlaybackSchema = z.strictObject({
+-	kind: z.union([z.literal("mp4"), z.literal("hls")]),
+-	src: safeSrc,
+-});
+-
+-export const audioPlaybackSchema = z.strictObject({
+-	kind: z.union([z.literal("audio"), z.literal("hls")]),
+-	src: safeSrc,
+-});
+-
+-export const recordingRangePayloadSchema = z
+-	.strictObject({
+-		kind: z.literal("recording-range"),
+-		channelId: nonEmptyString,
+-		startTimeMs: positiveNumber,
+-		endTimeMs: positiveNumber,
+-		durationMs: positiveDuration,
+-		playback: hlsPlaybackSchema.optional(),
+-		sourceOffsetMs: positiveNumber.optional(),
+-		posterSrc: nonEmptyString.optional(),
+-		name: z.string().optional(),
+-	})
+-	.superRefine((value, ctx) => {
+-		if (value.endTimeMs <= value.startTimeMs) {
+-			ctx.addIssue({
+-				code: z.ZodIssueCode.custom,
+-				message: "endTimeMs must be greater than startTimeMs",
+-				path: ["endTimeMs"],
+-			});
+-		}
+-
+-		if (value.sourceOffsetMs !== undefined && value.sourceOffsetMs > value.durationMs) {
+-			ctx.addIssue({
+-				code: z.ZodIssueCode.custom,
+-				message: "sourceOffsetMs must be less than or equal to durationMs",
+-				path: ["sourceOffsetMs"],
+-			});
+-		}
+-	})
+-	.refine((p) => p.durationMs <= MAX_PREVIEW_DURATION_MS, {
+-		message: "durationMs exceeds the maximum supported preview duration",
+-		path: ["durationMs"],
+-	});
+-
+-export const mediaPayloadSchema = z
+-	.strictObject({
+-		kind: z.literal("media"),
+-		mediaId: nonEmptyString,
+-		durationMs: positiveNumber.optional(),
+-		playback: mediaPlaybackSchema,
+-		posterSrc: nonEmptyString.optional(),
+-		name: z.string().optional(),
+-	})
+-	.refine((p) => (p.durationMs ?? 0) <= MAX_PREVIEW_DURATION_MS, {
+-		message: "durationMs exceeds the maximum supported preview duration",
+-		path: ["durationMs"],
+-	});
+-
+-export const audioRangePayloadSchema = z
+-	.strictObject({
+-		kind: z.literal("audio-range"),
+-		audioId: nonEmptyString,
+-		startTimeMs: positiveNumber.optional(),
+-		endTimeMs: positiveNumber.optional(),
+-		durationMs: positiveDuration,
+-		playback: audioPlaybackSchema,
+-		sourceOffsetMs: positiveNumber.optional(),
+-		name: z.string().optional(),
+-	})
+-	.superRefine((value, ctx) => {
+-		if (
+-			value.startTimeMs !== undefined &&
+-			value.endTimeMs !== undefined &&
+-			value.endTimeMs <= value.startTimeMs
+-		) {
+-			ctx.addIssue({
+-				code: z.ZodIssueCode.custom,
+-				message: "endTimeMs must be greater than startTimeMs",
+-				path: ["endTimeMs"],
+-			});
+-		}
+-
+-		if (value.sourceOffsetMs !== undefined && value.sourceOffsetMs > value.durationMs) {
+-			ctx.addIssue({
+-				code: z.ZodIssueCode.custom,
+-				message: "sourceOffsetMs must be less than or equal to durationMs",
+-				path: ["sourceOffsetMs"],
+-			});
+-		}
+-
+-		if (value.playback.kind !== "hls" && !likelyAudioSrc(value.playback.src)) {
+-			ctx.addIssue({
+-				code: z.ZodIssueCode.custom,
+-				message: "audio-range src must point to audio or HLS media",
+-				path: ["playback", "src"],
+-			});
+-		}
+-	})
+-	.refine((p) => p.durationMs <= MAX_PREVIEW_DURATION_MS, {
+-		message: "durationMs exceeds the maximum supported preview duration",
+-		path: ["durationMs"],
+-	});
+-
+-export const previewItemPayloadSchema = z.union([
+-	recordingRangePayloadSchema,
+-	mediaPayloadSchema,
+-	audioRangePayloadSchema,
+-]);
+-
+-export const editorAddPreviewItemMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_ADD_PREVIEW_ITEM"),
+-	requestId: requestIdSchema,
+-	payload: previewItemPayloadSchema,
+-});
+-
+-export const editorClearProjectMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_CLEAR_PROJECT"),
+-	requestId: requestIdSchema,
+-});
+-
+-export const editorSetAuthMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_SET_AUTH"),
+-	token: nonEmptyString,
+-});
+-
+-export const parentToEditorMessageSchema = z.union([
+-	editorAddPreviewItemMessageSchema,
+-	editorClearProjectMessageSchema,
+-	editorSetAuthMessageSchema,
+-]);
+-
+-export const editorPreviewItemAddedMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_PREVIEW_ITEM_ADDED"),
+-	requestId: requestIdSchema,
+-	itemId: nonEmptyString,
+-});
+-
+-export const editorPreviewItemRejectedMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_PREVIEW_ITEM_REJECTED"),
+-	requestId: requestIdSchema,
+-	reason: nonEmptyString,
+-});
+-
+-export const editorProjectClearedMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_PROJECT_CLEARED"),
+-	requestId: requestIdSchema,
+-});
+-
+-const savedMediaItemSchema = z.discriminatedUnion("type", [
+-	z.strictObject({ type: z.literal("image"), id: nonEmptyString }),
+-	z.strictObject({ type: z.literal("clip"), id: nonEmptyString }),
+-	z.strictObject({
+-		type: z.literal("recording"),
+-		id: nonEmptyString,
+-		from: positiveNumber,
+-		to: positiveNumber,
+-	}),
+-	z.strictObject({
+-		type: z.literal("audio"),
+-		id: nonEmptyString,
+-		from: positiveNumber,
+-		to: positiveNumber,
+-	}),
+-]);
+-
+-export const editorMediaSavedMessageSchema = z.strictObject({
+-	type: z.literal("EDITOR_MEDIA_SAVED"),
+-	mediaId: nonEmptyString,
+-	mediaName: nonEmptyString,
+-	downloadToComputer: z.boolean(),
+-	saveToPersonalChannel: z.boolean(),
+-	selectedUnitChannelIds: z.array(z.string()),
+-	url: safeSrc,
+-	exportType: z.union([z.literal("mp4"), z.literal("webp")]),
+-	items: z.array(savedMediaItemSchema),
+-});
+-
+-export const editorToParentMessageSchema = z.union([
+-	editorPreviewItemAddedMessageSchema,
+-	editorPreviewItemRejectedMessageSchema,
+-	editorProjectClearedMessageSchema,
+-	editorMediaSavedMessageSchema,
+-]);
+diff --git a/packages/editor-contract/tsconfig.json b/packages/editor-contract/tsconfig.json
+deleted file mode 100644
+index 881778d..0000000
+--- a/packages/editor-contract/tsconfig.json
++++ /dev/null
+@@ -1,23 +0,0 @@
+-{
+-	"compilerOptions": {
+-		"target": "ES2022",
+-		"module": "NodeNext",
+-		"moduleResolution": "NodeNext",
+-		"strict": true,
+-		"skipLibCheck": true,
+-		"esModuleInterop": true,
+-		"resolveJsonModule": true,
+-		"types": ["node"],
+-		"noUnusedLocals": true,
+-		"useUnknownInCatchVariables": true,
+-		"noFallthroughCasesInSwitch": true,
+-		"noImplicitReturns": true,
+-		"verbatimModuleSyntax": true,
+-		"declaration": true,
+-		"sourceMap": true,
+-		"rootDir": "src",
+-		"outDir": "dist"
+-	},
+-	"include": ["src/**/*.ts"],
+-	"exclude": ["dist", "node_modules"]
+-}
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index c12a45c..09962de 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -6,6 +6,9 @@ settings:
+ 
+ catalogs:
+   default:
++    '@biomejs/biome':
++      specifier: 2.4.15
++      version: 2.4.15
+     '@types/node':
+       specifier: ^25.9.1
+       version: 25.9.1
+@@ -137,9 +140,9 @@ importers:
+       '@tanstack/react-query':
+         specifier: ^5.100.14
+         version: 5.100.14(react@19.2.6)
+-      '@video-editor/iframe-contract':
++      '@video-editor/contract':
+         specifier: workspace:*
+-        version: link:../../packages/editor-contract
++        version: link:../../packages/contract
+       axios:
+         specifier: ^1.10.0
+         version: 1.16.1
+@@ -304,6 +307,9 @@ importers:
+       '@ffmpeg-installer/ffmpeg':
+         specifier: ^1.1.0
+         version: 1.1.0
++      '@video-editor/contract':
++        specifier: workspace:*
++        version: link:../../packages/contract
+       '@ztube/observability':
+         specifier: workspace:*
+         version: link:../../packages/observability
+@@ -351,7 +357,7 @@ importers:
+         specifier: 'catalog:'
+         version: 3.2.4(@types/node@25.9.1)(jiti@2.7.0)(jsdom@20.0.3(canvas@2.11.2))(less@4.4.2)(lightningcss@1.32.0)(sass@1.97.3)(terser@5.46.0)(yaml@2.9.0)
+ 
+-  packages/editor-contract:
++  packages/contract:
+     dependencies:
+       zod:
+         specifier: 'catalog:'

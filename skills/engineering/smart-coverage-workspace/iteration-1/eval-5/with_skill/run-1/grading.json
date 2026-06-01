@@ -1,0 +1,20 @@
+{
+  "expectations": [
+    {
+      "text": "E2E Gaps section present",
+      "passed": true,
+      "evidence": "1 match for E2E Gaps section header"
+    },
+    {
+      "text": "TypeScript use-case gap reported",
+      "passed": true,
+      "evidence": "8 matches for When/Then in TS section"
+    }
+  ],
+  "summary": {
+    "pass_rate": 1.0,
+    "passed": 2,
+    "failed": 0,
+    "total": 2
+  }
+}

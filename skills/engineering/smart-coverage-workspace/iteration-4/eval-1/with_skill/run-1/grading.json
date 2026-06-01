@@ -1,0 +1,35 @@
+{
+  "expectations": [
+    {
+      "text": "Output contains TypeScript test syntax",
+      "passed": true,
+      "evidence": "Report contains describe/it/expect blocks with TypeScript syntax throughout all three suggested test snippets"
+    },
+    {
+      "text": "Output does NOT contain Go/Angular/Flutter syntax",
+      "passed": true,
+      "evidence": "Report is entirely TypeScript; no Go func Test*, no TestBed, no Flutter widget test patterns appear anywhere"
+    },
+    {
+      "text": "Identifies Critical or High gap for controller",
+      "passed": true,
+      "evidence": "Three High gaps identified for apps/server/payment.controller.ts covering happy-path, amount=0 validation, and use-case call seam"
+    },
+    {
+      "text": "Uses app.inject() pattern (not mockReply/vi.fn() mocks for HTTP layer)",
+      "passed": true,
+      "evidence": "All three suggested test snippets use app.inject({ method, url, payload }) for HTTP simulation; no mockReply or raw vi.fn() on reply object"
+    },
+    {
+      "text": "Handles amount=0 falsy edge case",
+      "passed": true,
+      "evidence": "Gap 2 explicitly includes a test case with payload { amount: 0, currency: 'USD' } asserting 400 response"
+    }
+  ],
+  "summary": {
+    "pass_rate": 1.0,
+    "passed": 5,
+    "failed": 0,
+    "total": 5
+  }
+}

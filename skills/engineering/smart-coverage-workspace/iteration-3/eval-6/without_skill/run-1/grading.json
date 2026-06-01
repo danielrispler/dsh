@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "No TypeScript describe( syntax", "passed": true, "evidence": "0 matches for describe(. Uses bats-core @test syntax throughout."},
+    {"text": "No Go func Test syntax", "passed": true, "evidence": "0 matches for func Test."},
+    {"text": "Generic AAA or fallback handling present", "passed": true, "evidence": "Full bats-core @test suite with PATH-stub injection, 7 test cases, complete remediation plan."}
+  ],
+  "summary": {"pass_rate": 1.0, "passed": 3, "failed": 0, "total": 3}
+}

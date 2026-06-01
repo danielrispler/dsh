@@ -1,0 +1,30 @@
+{
+  "expectations": [
+    {
+      "text": "No TypeScript describe( syntax",
+      "passed": true,
+      "evidence": "Report contains only BATS syntax (@test, run, [ \"$status\" ...]); no describe(/it( TypeScript patterns appear anywhere"
+    },
+    {
+      "text": "No Go func Test syntax",
+      "passed": true,
+      "evidence": "Report contains only BATS/bash syntax; no func Test* Go patterns appear anywhere"
+    },
+    {
+      "text": "Generic AAA or fallback handling present",
+      "passed": true,
+      "evidence": "All BATS test snippets include '# Arrange', '# Act', '# Assert' comments following the AAA pattern"
+    },
+    {
+      "text": "Uses $BATS_TEST_TMPDIR (not /tmp) for kubectl-calls",
+      "passed": true,
+      "evidence": "All references to the kubectl call log use $BATS_TEST_TMPDIR/kubectl-calls; no hardcoded /tmp paths appear in the report"
+    }
+  ],
+  "summary": {
+    "pass_rate": 1.0,
+    "passed": 4,
+    "failed": 0,
+    "total": 4
+  }
+}

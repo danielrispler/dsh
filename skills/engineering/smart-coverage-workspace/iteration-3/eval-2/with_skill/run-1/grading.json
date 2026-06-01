@@ -1,0 +1,20 @@
+{
+  "expectations": [
+    {
+      "text": "TestBed used for Angular component",
+      "passed": true,
+      "evidence": "TestBed.configureTestingModule + componentRef.setInput + detectChanges shown"
+    },
+    {
+      "text": "describe/it used for controller",
+      "passed": true,
+      "evidence": "describe/it with When/Then naming for getUser controller"
+    },
+    {
+      "text": "No syntax mixing",
+      "passed": true,
+      "evidence": "Angular TestBed for component; plain describe/it for controller. No bleed. Exit Door 2/3/4/5 correctly dropped for stub controller."
+    }
+  ],
+  "summary": {"pass_rate": 1.0, "passed": 3, "failed": 0, "total": 3}
+}
