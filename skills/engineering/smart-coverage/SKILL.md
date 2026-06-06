@@ -52,6 +52,28 @@ For each file in the working set, name its type (from FILE_CLASSIFICATION) and i
 
 ---
 
+## Phase 2.5: Concurrency Triage
+
+For each file classified adapter or use-case, single grep over the source for:
+
+```
+private\s+\w+\s*:\s*(\w+\s*\|\s*null|Map|Set|Promise|.*Channel.*|.*Connection.*)
+setTimeout|setInterval|sleep\s*\(
+\.on\(['"](?:error|close|return)['"]
+async\s+(connect|close|drain|reconnect|retry|shutdown)
+```
+
+≥ 2 categories hit → mark **stateful-async** → Exit Door 6 mandatory → enumerate interleaving matrix:
+
+- **M1 Concurrent invocation:** same method × N callers → final state consistent?
+- **M2 Lifecycle interleaving:** every public method × every other → which pairs share mutable state? List unsafe pairs.
+- **M3 Empty-tracker misread:** any observer (`drain`/`size`/`has`) reads a collection transiently empty mid-operation?
+- **M4 Listener-after-close:** any `.on('close'|'error'|'return')` mutates state `close()` also touches? Order not guaranteed.
+
+One test per unsafe pair / unsafe row under Exit Door 6.
+
+---
+
 ## Phase 3: Existing Coverage
 
 For each classified file:
@@ -85,6 +107,16 @@ Output one bullet per redundant test under `### 🔁 Redundant Tests` in Phase 5
 
 ### 4a. Bug & Seam Surface (depth pass — do this first)
 
+**Coverage-migration precondition** — before applying any "coverage matches pre-move state" skip, verify with a single check:
+
+```bash
+git grep -l "<symbol>" -- '*.test.ts' '*.spec.ts' '*_test.go'
+```
+
+against the PRE-move path. If zero test files reference the symbol at the old path, the file is **new surface**, not migrated coverage. Continue with full gap analysis.
+
+**Schema-file bypass:** Zod schemas (`z.object`, `z.union`, `.refine`, `.preprocess`, `.default`) and Go validator schemas are never auto-skipped even on import-path-only diffs. Run a behavior-shape audit: defaults, refinements, preprocessors, union variants, bounds asymmetries.
+
 **Fast-Pass condition:** SKIP this entire phase if **all** the following are true:
 - Diff is under ~20 lines of source code (excluding imports/whitespace).
 - Source contains **no** branching (`if`/`else`/`switch`/`match`/`?`), **no** loops, **no** external calls (HTTP, DB, queue, FS, exec), and **no** unchecked error returns.
@@ -111,6 +143,7 @@ A stub = body returns a hardcoded literal / has TODO/FIXME / throws "not impleme
   - ED 2 (state): drop unless source persists (DB call, cache, file write). Comments do NOT count.
   - ED 3 (external call): drop unless source actually calls out.
   - ED 4 (queue events): drop unless source publishes.
+  - ED 6 (concurrency): drop unless source has private mutable state + async lifecycle methods (i.e. would have been flagged stateful-async by Phase 2.5).
 
 ### 4c. Speculative-API gate
 
@@ -138,11 +171,13 @@ Re-read the source diff for each trigger below. **Scope: only the added/modified
 
 Also notice non-obvious bugs that fall out of this scan: a falsy check that swallows `NaN`, a `<` that should be `<=`, a guard with mismatched bounds. Promote those into Phase 4a § Likely Bug.
 
+**Cookie/header parser swap:** when the diff swaps an auth source in a controller (cookie ↔ header ↔ query), enumerate 8 cases under Error path: case-sensitivity, `string | string[]` shape, `decodeURIComponent` URIError, position-in-list, whitespace tolerance, missing value, empty value, malformed encoding.
+
 ### 4e. Severity buckets
 
-**🔴 Critical** — HTTP route / use-case with no test file at all; auth / access-control path untested.
-**🟠 High** — Missing ED 5 (error), ED 2 (state), ED 3 (external call); new file w/ non-trivial logic + zero tests; missing edge-case where source explicitly handles a boundary (zero/empty/null/off-by-one).
-**🟡 Medium** — UI component w/ no render test; state store w/o shape test; utility w/o coverage; partial tests missing one significant variant; race/concurrency path where source uses goroutines/async/shared mutable state.
+**🔴 Critical** — HTTP route / use-case with no test file at all; auth / access-control path untested; stateful-async file where `close`/`drain`/`reconnect` share mutable state with `publish` AND zero Exit Door 6 tests.
+**🟠 High** — Missing ED 5 (error), ED 2 (state), ED 3 (external call); new file w/ non-trivial logic + zero tests; missing edge-case where source explicitly handles a boundary (zero/empty/null/off-by-one); stateful-async file missing any M1–M4 test; positional-arg helper with ≥5 params OR mixed string/boolean types (auto-promote from default Medium); unit-tested class shared via container/singleton whose singleton-ness drives correctness — wiring test is High, not Critical.
+**🟡 Medium** — UI component w/ no render test; state store w/o shape test; utility w/o coverage; partial tests missing one significant variant; race/concurrency path where source uses goroutines/async/shared mutable state; sibling methods on same class with diverging param shape (e.g. only one takes `timeoutMs`) — "documented asymmetry" gap.
 **🟢 Low** — Extra edges for already-tested logic; logging/observability beyond error case; trivial type wrappers.
 
 ### 4f. Consistency rule
@@ -173,11 +208,12 @@ Count actual gaps per tier from your Phase 4 buckets — exact numbers in the he
 ### 🟠 High
 **`path/to/file`**
 Gap 1 — [short name] (Exit Door N)
+Why: [≤120 char invariant — what breaks if this gap goes untested]
 ```<lang>
 [runnable sketch]
 ```
 
-### 🟡 Medium / 🟢 Low — same format.
+### 🟡 Medium / 🟢 Low — same format (include the `Why:` line under each gap).
 
 ### ✅ Already Covered
 - `path/to/file` — exit doors 1, 5 covered
@@ -188,11 +224,14 @@ Gap 1 — [short name] (Exit Door N)
 ### ⏭️ Skipped
 - `path/to/file` — [reason]
 
+### 📋 Non-test review findings  (omit if none, max 5 items)
+- **`path:line`** — [one-line code-quality issue] — [one-line fix]
+
 ### Remediation Plan
 [Ordered, one action per line. Critical first, then High. For polyglot diffs: group entirely by language — TS items 1-N, then Go items 1-M. Never interleave.]
 ```
 
-**Empty section:** OMIT the section header entirely (no `_None._`, no narration). If `🐛 Likely Bug Surfaced`, `🔴 Critical`, `🟠 High`, `🟡 Medium`, `🟢 Low`, `✅ Already Covered`, `🔁 Redundant Tests`, or `⏭️ Skipped` would have zero entries, drop the header from the output entirely. The only header that always renders is `## Coverage Gap Report` (with the summary line) and `### Remediation Plan` (which always has at least one action when gaps exist).
+**Empty section:** OMIT the section header entirely (no `_None._`, no narration) for `🐛 Likely Bug Surfaced`, `🔴 Critical`, `🟠 High`, `🟡 Medium`, `🟢 Low`, `🔁 Redundant Tests`, and `📋 Non-test review findings`. **Always render** `## Coverage Gap Report` (with the summary line), `### ✅ Already Covered`, `### ⏭️ Skipped`, and `### Remediation Plan` — if empty, render the header followed by `_None._`. The reviewer relies on the always-rendered sections to trust the report instead of re-deriving from negative space.
 
 **Test sketch requirement:** runnable body with real assertions.
 - Go HTTP handlers: `net/http/httptest` (`httptest.NewRecorder()` + `httptest.NewRequest()`), not comments.
