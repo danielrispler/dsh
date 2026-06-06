@@ -1,8 +1,0 @@
-{
-  "expectations": [
-    {"text": "No TypeScript describe( syntax", "passed": true, "evidence": "0 matches for describe(. Uses bats-core @test syntax throughout."},
-    {"text": "No Go func Test syntax", "passed": true, "evidence": "0 matches for func Test. Uses bats-core @test syntax."},
-    {"text": "Generic AAA or fallback handling present", "passed": true, "evidence": "deploy.sh detected as lang=bash via .sh extension. bash.md loaded. @test with PATH-stub injection pattern — proper bash-specific handling rather than generic JS-shaped pseudo-code."}
-  ],
-  "summary": {"pass_rate": 1.0, "passed": 3, "failed": 0, "total": 3}
-}

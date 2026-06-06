@@ -28,20 +28,16 @@ fi
 
 # Find config files (single find, no per-file tree walk)
 CONFIGS=$(find . -maxdepth 4 \
-  \( -name 'package.json' -o -name 'go.mod' -o -name 'Cargo.toml' \
-     -o -name 'requirements.txt' -o -name 'pyproject.toml' -o -name 'pubspec.yaml' \) \
-  -not -path '*/node_modules/*' -not -path '*/dist/*' -not -path '*/target/*' \
+  \( -name 'package.json' -o -name 'go.mod' \) \
+  -not -path '*/node_modules/*' -not -path '*/dist/*' \
   2>/dev/null)
 
 # Map config filename -> language
 config_to_lang() {
   case "$(basename "$1")" in
-    package.json)                    echo "typescript" ;;
-    go.mod)                          echo "golang" ;;
-    Cargo.toml)                      echo "rust" ;;
-    requirements.txt|pyproject.toml) echo "python" ;;
-    pubspec.yaml)                    echo "flutter" ;;
-    *)                               echo "fallback" ;;
+    package.json) echo "typescript" ;;
+    go.mod)       echo "golang" ;;
+    *)            echo "fallback" ;;
   esac
 }
 
@@ -65,12 +61,6 @@ find_lang_for_file() {
       fi
     fi
   done <<< "$CONFIGS"
-  # Promote known extensions even when no config file was found
-  if [[ "$best_lang" == "fallback" ]]; then
-    case "$file" in
-      *.sh) best_lang="bash" ;;
-    esac
-  fi
   echo "$best_lang"
 }
 
@@ -136,24 +126,6 @@ candidate_tests() {
     golang)
       echo "$dir/${stem}_test.go"
       ;;
-    python)
-      echo "$dir/test_$stem.py"
-      echo "$dir/${stem}_test.py"
-      echo "$dir/tests/test_$stem.py"
-      ;;
-    rust)
-      echo "$dir/tests/${stem}.rs"
-      ;;
-    flutter)
-      echo "$dir/${stem}_test.dart"
-      echo "test/${stem}_test.dart"
-      ;;
-    bash)
-      echo "$dir/${stem}.bats"
-      echo "$dir/test_${stem}.sh"
-      echo "$dir/${stem}_test.sh"
-      echo "tests/${stem}.bats"
-      ;;
   esac
 }
 
@@ -166,7 +138,7 @@ while IFS= read -r f; do
   [[ "$lang" == "fallback" ]] && continue
   # Skip if this file IS itself a test file
   case "$(basename "$f")" in
-    *_test.go|*.test.ts|*.test.tsx|*.test.js|*.test.jsx|*.spec.ts|*.spec.tsx|*.spec.js|*.spec.jsx|test_*.py|*_test.py|*_test.dart|*.bats|test_*.sh|*_test.sh) continue ;;
+    *_test.go|*.test.ts|*.test.tsx|*.test.js|*.test.jsx|*.spec.ts|*.spec.tsx|*.spec.js|*.spec.jsx) continue ;;
   esac
   matches=()
   while IFS= read -r cand; do

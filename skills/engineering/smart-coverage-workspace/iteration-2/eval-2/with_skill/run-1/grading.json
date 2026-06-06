@@ -1,8 +1,0 @@
-{
-  "expectations": [
-    {"text": "TestBed used for Angular component", "passed": true, "evidence": "TestBed.configureTestingModule + fixture.componentRef.setInput('name', 'Alice') + detectChanges()"},
-    {"text": "describe/it used for controller", "passed": true, "evidence": "describe('getUser', () => { it('When called with a valid request, Then replies..."},
-    {"text": "No syntax mixing", "passed": true, "evidence": "Angular component uses TestBed; controller uses plain describe/it. When/Then naming applied to both (not 'should'). No bleed."}
-  ],
-  "summary": {"pass_rate": 1.0, "passed": 3, "failed": 0, "total": 3}
-}

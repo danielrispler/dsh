@@ -1,1 +1,0 @@
-{"eval_id":6,"eval_name":"unknown-language-fallback","prompt":"bash deploy.sh with no package.json/go.mod. Verify generic AAA pseudo-code.","assertions":[{"text":"No TypeScript describe( syntax","passed":null,"evidence":""},{"text":"No Go func Test syntax","passed":null,"evidence":""},{"text":"Generic AAA or fallback handling present","passed":null,"evidence":""}]}

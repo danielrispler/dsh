@@ -1,8 +1,0 @@
-{
-  "expectations": [
-    {"text": "Separate TypeScript and Go sections", "passed": true, "evidence": "## TypeScript and ## Go top-level sections, each self-contained"},
-    {"text": "TypeScript section uses describe/it", "passed": true, "evidence": "describe('uploadFile', () => { it('When a valid file upload..."},
-    {"text": "Go section uses func Test*", "passed": true, "evidence": "func TestResizeImage_WhenValidPathAndDimensions_ThenReturnsNil(t *testing.T)"}
-  ],
-  "summary": {"pass_rate": 1.0, "passed": 3, "failed": 0, "total": 3}
-}

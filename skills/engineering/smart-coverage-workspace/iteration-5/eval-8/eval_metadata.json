@@ -1,1 +1,0 @@
-{"eval_id":8,"eval_name":"go-dead-tests","prompt":"I modified billing/billing.go — I deleted ProcessRefund and renamed CalculateTax to ComputeTax. The existing billing/billing_test.go still references the old names. Use smart-coverage."}

@@ -137,29 +137,6 @@
       ]
     },
     {
-      "id": 6,
-      "prompt": "I changed scripts/deploy.sh (a bash deployment script with no package.json or go.mod nearby). What tests should I write? Use smart-coverage.",
-      "expected_output": "Uses generic AAA pseudo-code because language is unknown/fallback. No language-specific syntax (no describe, func Test, testWidgets, etc.).",
-      "files": [],
-      "assertions": [
-        {
-          "text": "Output does NOT contain describe( (TypeScript leak)",
-          "type": "not_contains",
-          "value": "describe("
-        },
-        {
-          "text": "Output does NOT contain func Test (Go leak)",
-          "type": "not_contains",
-          "value": "func Test"
-        },
-        {
-          "text": "Output contains generic AAA or fallback handling",
-          "type": "contains_any",
-          "values": ["Arrange", "Act", "Assert", "AAA", "generic", "fallback", "pseudo"]
-        }
-      ]
-    },
-    {
       "id": 7,
       "prompt": "I added apps/server/order.controller.ts and apps/server/order.controller.test.ts (4 tests). Use smart-coverage to check coverage gaps AND flag any redundant tests.",
       "expected_output": "Detects redundant tests in the test file: at least one DUPLICATE/SUBSET tag and one LOW SIGNAL tag. Recommends human review rather than auto-deletion. No invented APIs.",

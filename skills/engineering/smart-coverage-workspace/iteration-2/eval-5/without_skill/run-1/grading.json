@@ -1,7 +1,0 @@
-{
-  "expectations": [
-    {"text": "E2E Gaps section present", "passed": true, "evidence": "Dedicated E2E Gaps section with { request } fixture for API-level tests"},
-    {"text": "TypeScript use-case gap reported", "passed": true, "evidence": "Critical: checkout(cartId) return value untested"}
-  ],
-  "summary": {"pass_rate": 1.0, "passed": 2, "failed": 0, "total": 2}
-}

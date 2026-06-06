@@ -31,7 +31,7 @@ bash .claude/skills/smart-coverage/scripts/detect-langs.sh
 
 Output JSON: `{files: {path: lang}, frameworks: [...], playwright: bool, existing_tests: {source_path: [test_path,...]}}`.
 
-For each unique `lang`: load `references/<lang>.md`. Supported: `typescript`, `golang`, `python`, `rust`, `flutter`, `bash`. If `lang=fallback`: use only `testing-principles.md`; emit generic AAA pseudo-code.
+For each unique `lang`: load `references/<lang>.md`. Supported: `typescript`, `golang`. Framework overlays: `react`, `angular`, `playwright`. If `lang=fallback`: use only `testing-principles.md`; emit generic AAA pseudo-code.
 
 For each entry in `frameworks[]`: load `references/<framework>.md` as additive overlay (overrides base only for sections it defines).
 If `playwright=true`: load `references/playwright.md`.
@@ -129,12 +129,12 @@ Banned silently-emitted symbols (illustrative): `mockGateway`, `stubChargeCard`,
 
 Re-read the source diff for each trigger below. **Scope: only the added/modified lines of this diff** — do not scan untouched parts of the file. **Only flag if the trigger is in source** — never invent.
 
-| Category | TS/JS | Go | Python | Rust | Severity |
-|---|---|---|---|---|---|
-| Falsy/zero/empty | `!x`, `x == null`, `x === 0`, `x === ''`, `x.length === 0` | `x == 0`, `x == nil`, `len(x) == 0`, `s == ""` | `not x`, `x is None`, `len(x) == 0` | `x.is_none()`, `x.is_empty()` | High |
-| Boundary | `<`, `<=`, `>`, `>=` against constants; `x < 0 \|\| x > 100` | same | same; slice bounds | same | High |
-| Error path | `throw new`, `return { error }`, `Promise.reject` | `return err`, `panic(`, `fmt.Errorf` | `raise`, `Err(...)` | `Err(...)`, `panic!`, `?` | High (ED 5) |
-| Concurrency | `Promise.all`, `await` in loop, shared module state | `go `, `chan`, `sync.Mutex`, `atomic.` | `asyncio.gather`, `threading.` | `tokio::spawn`, `Arc<Mutex>`, `mpsc::` | Medium |
+| Category | TS/JS | Go | Severity |
+|---|---|---|---|
+| Falsy/zero/empty | `!x`, `x == null`, `x === 0`, `x === ''`, `x.length === 0` | `x == 0`, `x == nil`, `len(x) == 0`, `s == ""` | High |
+| Boundary | `<`, `<=`, `>`, `>=` against constants; `x < 0 \|\| x > 100` | same | High |
+| Error path | `throw new`, `return { error }`, `Promise.reject` | `return err`, `panic(`, `fmt.Errorf` | High (ED 5) |
+| Concurrency | `Promise.all`, `await` in loop, shared module state | `go `, `chan`, `sync.Mutex`, `atomic.` | Medium |
 
 Also notice non-obvious bugs that fall out of this scan: a falsy check that swallows `NaN`, a `<` that should be `<=`, a guard with mismatched bounds. Promote those into Phase 4a § Likely Bug.
 

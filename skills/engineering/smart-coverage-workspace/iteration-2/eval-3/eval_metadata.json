@@ -1,1 +1,0 @@
-{"eval_id":3,"eval_name":"go-only-http-handler","prompt":"Go HTTP handler + go.sum. Verify func Test* syntax, go.sum skipped.","assertions":[{"text":"func Test* syntax in output","passed":null,"evidence":""},{"text":"go.sum listed as skipped","passed":null,"evidence":""},{"text":"No TypeScript syntax leak","passed":null,"evidence":""}]}

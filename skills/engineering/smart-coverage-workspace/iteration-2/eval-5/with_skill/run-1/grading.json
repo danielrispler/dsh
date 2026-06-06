@@ -1,7 +1,0 @@
-{
-  "expectations": [
-    {"text": "E2E Gaps section present", "passed": true, "evidence": "### E2E Gaps section appended after main report. Uses { request } API fixture (not { page }) for server-side use-case."},
-    {"text": "TypeScript use-case gap reported", "passed": true, "evidence": "Critical: checkout.use-case.ts Exit Door 1 — Response [TDD]"}
-  ],
-  "summary": {"pass_rate": 1.0, "passed": 2, "failed": 0, "total": 2}
-}
