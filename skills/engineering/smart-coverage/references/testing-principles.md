@@ -4,17 +4,20 @@
 
 Black-box, behavior-first testing. Test public interfaces only. Refactors that do not change observable behavior should break zero tests.
 
-**5 exit doors apply regardless of language. What varies is how you observe each exit.**
+**6 exit doors apply regardless of language. What varies is how you observe each exit.**
 
-## The 5 Exit Doors
+## The 6 Exit Doors
 
-Every public operation has up to 5 observable "exits". A test covers a gap only when it asserts on the exit — not merely exercises the code path.
+Every public operation has up to 6 observable "exits". A test covers a gap only when it asserts on the exit — not merely exercises the code path.
 
 1. **Response** — return value, HTTP status, body shape
 2. **New State** — data persisted (verify via public API, not raw DB/memory inspection)
 3. **External Calls** — calls to external systems (cache, storage, queues, FFmpeg, etc.) are correct
 4. **Message Queue Events** — messages published with correct routing key and payload
 5. **Observability** — error path tested; failure produces correct response/error
+6. **Temporal/Concurrency Edges** — for objects holding mutable state across async boundaries: concurrent invocation produces consistent final state; no orphaned resources; lifecycle methods (connect/close/drain/reconnect/retry) compose safely under interleaving; observers do not misread transient empty state mid-operation.
+
+   Black-box pattern: drive N concurrent calls against the public method, assert observable final state (no leaked handles, single resource per logical entity, in-flight tracker empty after `drain()`). Real fakes only (in-process AMQP double, `vi.useFakeTimers()`).
 
 ## Priority Rules
 
@@ -46,7 +49,8 @@ Maps file type → applicable exit doors. Use loaded language reference for lang
 | UI component (stateful) | 1,5 | Render + error; see framework ref for syntax |
 | State store | 1,2 | State shape & changes |
 | Pure utility | 1 only | Input → output |
-| Adapter / infrastructure | 3,4 | External system calls |
+| Stateful async adapter (publisher, subscriber, connection pool, retry/reconnect state machine) | 3,4,6 | Lifecycle → E6 mandatory |
+| Stateless infra adapter (S3 wrapper, FFmpeg spawn helper) | 3,4 | No long-lived state |
 | Config / bootstrap / env | None | Skip |
 | Type-only | None | Skip |
 

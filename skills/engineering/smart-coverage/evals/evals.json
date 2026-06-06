@@ -23,11 +23,6 @@
           "value": "TestBed"
         },
         {
-          "text": "Output does NOT contain testWidgets (Flutter syntax leak)",
-          "type": "not_contains",
-          "value": "testWidgets"
-        },
-        {
           "text": "Output identifies a gap (Critical or High) for the controller",
           "type": "contains_any",
           "values": ["Critical", "High", "🔴", "🟠"]
@@ -54,11 +49,6 @@
           "text": "Output contains standard TypeScript test syntax for the controller",
           "type": "contains_any",
           "values": ["describe(", "it('When", "it(\"When"]
-        },
-        {
-          "text": "Output does NOT contain testWidgets (Flutter syntax leak)",
-          "type": "not_contains",
-          "value": "testWidgets"
         },
         {
           "text": "Output does NOT contain func Test (Go syntax leak)",

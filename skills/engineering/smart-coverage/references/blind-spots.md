@@ -11,8 +11,6 @@ Scan diff for explicit falsy checks. Each one is a separate test case.
 |------|----------|
 | TS/JS | `!x`, `x == null`, `x === 0`, `x === ''`, `x.length === 0`, `Array.isArray(x) && !x.length` |
 | Go | `if x == 0`, `if x == nil`, `if len(x) == 0`, `if s == ""` |
-| Python | `if not x`, `if x is None`, `if len(x) == 0` |
-| Rust | `if x.is_none()`, `if x.is_empty()`, `match Some(0)` |
 
 If trigger present → gap: missing test for that falsy input. **Severity: High** (source explicitly handles boundary).
 
@@ -21,8 +19,7 @@ Scan for inclusive vs. exclusive comparisons and explicit bounds.
 
 | Lang | Triggers |
 |------|----------|
-| TS/JS/Go/Rust | `<`, `<=`, `>`, `>=` against constants; `Math.max`, `Math.min`; range checks like `x < 0 \|\| x > 100` |
-| Python | same as above; `range(a, b)`; slice bounds |
+| TS/JS/Go | `<`, `<=`, `>`, `>=` against constants; `Math.max`, `Math.min`; range checks like `x < 0 \|\| x > 100` |
 
 For each bound found → tests at: below bound, exactly at bound, above bound, exactly at upper bound. **Severity: High**.
 
@@ -33,8 +30,6 @@ Scan for explicit throws/returns/panics.
 |------|----------|
 | TS/JS | `throw new`, `return { error: ... }`, `Promise.reject` |
 | Go | `return err`, `return nil, fmt.Errorf`, `panic(` |
-| Python | `raise`, `return Err(...)` |
-| Rust | `Err(...)`, `panic!`, `bail!`, `?` operator on fallible call |
 
 If unguarded by test → gap. **Severity: High (Exit Door 5)**.
 
@@ -45,8 +40,6 @@ Scan for primitives that imply a race window.
 |------|----------|
 | Go | `go ` keyword, `sync.Mutex`, `chan`, `sync.WaitGroup`, `atomic.` |
 | TS/JS | `Promise.all`, `await` in a loop, shared module-level state mutated by handler |
-| Python | `asyncio.gather`, `threading.`, `multiprocessing.` |
-| Rust | `tokio::spawn`, `Arc<Mutex<...>>`, `mpsc::channel` |
 
 If present and no isolation test → gap. **Severity: Medium** (race tests harder to write deterministically).
 
