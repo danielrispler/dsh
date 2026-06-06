@@ -1,0 +1,2619 @@
+diff --git a/apps/frontend/src/features/editor/state/reset-editor.ts b/apps/frontend/src/features/editor/state/reset-editor.ts
+new file mode 100644
+index 0000000..08c0754
+--- /dev/null
++++ b/apps/frontend/src/features/editor/state/reset-editor.ts
+@@ -0,0 +1,9 @@
++import { clearCaptionRotationCache } from "../player/items/caption-animations";
++import { audioDataManager } from "../player/lib/audio-data";
++import useUploadStore from "../store/use-upload-store";
++
++export const resetEditorForNewProject = () => {
++	audioDataManager.reset();
++	clearCaptionRotationCache();
++	useUploadStore.getState().resetUploadStore();
++};
+diff --git a/apps/frontend/src/features/editor/store/__tests__/selectors.test.ts b/apps/frontend/src/features/editor/store/__tests__/selectors.test.ts
+new file mode 100644
+index 0000000..977412c
+--- /dev/null
++++ b/apps/frontend/src/features/editor/store/__tests__/selectors.test.ts
+@@ -0,0 +1,52 @@
++import type { ITrackItem } from "@designcombo/types";
++import { describe, expect, it } from "vitest";
++import { selectActiveItem } from "../selectors";
++import type { ICompositionStore } from "../use-composition-store";
++
++const makeItem = (id: string): ITrackItem =>
++	({ id, type: "text", display: { from: 0, to: 1000 } }) as unknown as ITrackItem;
++
++const baseState = (overrides: Partial<ICompositionStore>): ICompositionStore =>
++	({
++		tracks: [],
++		trackItemIds: [],
++		trackItemsMap: {},
++		activeIds: [],
++		duration: 0,
++		fps: 30,
++		background: { type: "color", value: "transparent" },
++		size: { width: 1920, height: 1080 },
++		structure: [],
++		compositions: [],
++		setSize: () => {},
++		setCompositions: () => {},
++		updateTrackItemDetails: () => {},
++		...overrides,
++	}) as ICompositionStore;
++
++describe("selectActiveItem", () => {
++	it("returns null when no items selected", () => {
++		expect(selectActiveItem(baseState({ activeIds: [] }))).toBeNull();
++	});
++
++	it("returns null when multiple items selected", () => {
++		expect(
++			selectActiveItem(
++				baseState({
++					activeIds: ["a", "b"],
++					trackItemsMap: { a: makeItem("a"), b: makeItem("b") },
++				}),
++			),
++		).toBeNull();
++	});
++
++	it("returns null when selected id missing from trackItemsMap", () => {
++		expect(selectActiveItem(baseState({ activeIds: ["missing"], trackItemsMap: {} }))).toBeNull();
++	});
++
++	it("returns the item when exactly one id selected and present", () => {
++		const item = makeItem("a");
++		const result = selectActiveItem(baseState({ activeIds: ["a"], trackItemsMap: { a: item } }));
++		expect(result).toBe(item);
++	});
++});
+diff --git a/apps/frontend/src/features/editor/store/selectors.ts b/apps/frontend/src/features/editor/store/selectors.ts
+new file mode 100644
+index 0000000..175649a
+--- /dev/null
++++ b/apps/frontend/src/features/editor/store/selectors.ts
+@@ -0,0 +1,11 @@
++import type { ITrackItem } from "@designcombo/types";
++import useCompositionStore, { type ICompositionStore } from "./use-composition-store";
++
++export const selectActiveItem = (state: ICompositionStore): ITrackItem | null => {
++	if (state.activeIds.length !== 1) return null;
++	return state.trackItemsMap[state.activeIds[0]] ?? null;
++};
++
++export const useActiveItem = (): ITrackItem | null => useCompositionStore(selectActiveItem);
++
++export const useHasSelection = (): boolean => useCompositionStore((s) => s.activeIds.length > 0);
+diff --git a/apps/frontend/src/features/editor/control-item/control-item.tsx b/apps/frontend/src/features/editor/control-item/control-item.tsx
+index d7165f3..247ceb1 100644
+--- a/apps/frontend/src/features/editor/control-item/control-item.tsx
++++ b/apps/frontend/src/features/editor/control-item/control-item.tsx
+@@ -9,8 +9,8 @@ import type {
+ 	IVideo,
+ } from "@designcombo/types";
+ import { useEffect } from "react";
+-import useActiveItem from "../hooks/use-active-item";
+ import { MenuItem } from "../menu-item/menu-item";
++import { useActiveItem } from "../store/selectors";
+ import useLayoutStore from "../store/use-layout-store";
+ import BasicAudio from "./basic-audio";
+ import BasicCaption from "./basic-caption";
+diff --git a/apps/frontend/src/features/editor/download-progress-modal.tsx b/apps/frontend/src/features/editor/download-progress-modal.tsx
+index dc2eac5..211211b 100644
+--- a/apps/frontend/src/features/editor/download-progress-modal.tsx
++++ b/apps/frontend/src/features/editor/download-progress-modal.tsx
+@@ -57,16 +57,31 @@ const DownloadProgressModal = ({ stateManager }: { stateManager: StateManager })
+ 
+ 	useEffect(() => {
+ 		if (!displayProgressModal) return;
+-		fetchCore("/users/me")
++		const controller = new AbortController();
++		const { signal } = controller;
++		fetchCore("/users/me", { signal })
+ 			.then((r) => r.json())
+-			.then((data: { displayName?: string }) => setDisplayName(data.displayName ?? null))
+-			.catch(() => {});
++			.then((data: { displayName?: string }) => {
++				if (!signal.aborted) setDisplayName(data.displayName ?? null);
++			})
++			.catch((err) => {
++				if (err?.name !== "AbortError") {
++					// swallow non-abort errors as before
++				}
++			});
+ 		setChannelsLoading(true);
+-		fetchCore("/media/clip/managed-virtual-channels")
++		fetchCore("/media/clip/managed-virtual-channels", { signal })
+ 			.then((r) => r.json())
+-			.then((data: Channel[]) => setChannels(data))
+-			.catch(() => setChannels([]))
+-			.finally(() => setChannelsLoading(false));
++			.then((data: Channel[]) => {
++				if (!signal.aborted) setChannels(data);
++			})
++			.catch((err) => {
++				if (err?.name !== "AbortError" && !signal.aborted) setChannels([]);
++			})
++			.finally(() => {
++				if (!signal.aborted) setChannelsLoading(false);
++			});
++		return () => controller.abort();
+ 	}, [displayProgressModal]);
+ 
+ 	const handleNameChange = (value: string) => {
+diff --git a/apps/frontend/src/features/editor/editor.tsx b/apps/frontend/src/features/editor/editor.tsx
+index e359f3d..68682ef 100644
+--- a/apps/frontend/src/features/editor/editor.tsx
++++ b/apps/frontend/src/features/editor/editor.tsx
+@@ -11,7 +11,6 @@ import { TEXT_ADD_PAYLOAD } from "./constants/payload";
+ import { ControlItem } from "./control-item/control-item";
+ import CropModal from "./crop-modal/crop-modal";
+ import { useEditorPostMessage } from "./external-preview/use-editor-post-message";
+-import useActiveItem from "./hooks/use-active-item";
+ import useEasterEggs from "./hooks/use-easter-eggs";
+ import useKeyboardShortcuts from "./hooks/use-keyboard-shortcuts";
+ import useTimelineEvents from "./hooks/use-timeline-events";
+@@ -19,6 +18,7 @@ import Navbar from "./navbar";
+ import Scene from "./scene/scene";
+ import type { SceneRef } from "./scene/scene.types";
+ import { ShortcutsModal } from "./shortcuts-modal";
++import { useActiveItem } from "./store/selectors";
+ import useEditorRefs from "./store/use-editor-refs";
+ import useLayoutStore from "./store/use-layout-store";
+ import useUploadStore from "./store/use-upload-store";
+diff --git a/apps/frontend/src/features/editor/external-preview/payload-intake.ts b/apps/frontend/src/features/editor/external-preview/payload-intake.ts
+index 1ed7e88..b8f93e6 100644
+--- a/apps/frontend/src/features/editor/external-preview/payload-intake.ts
++++ b/apps/frontend/src/features/editor/external-preview/payload-intake.ts
+@@ -4,6 +4,7 @@ import { ADD_AUDIO, ADD_VIDEO } from "@designcombo/state";
+ import { generateId } from "@designcombo/timeline";
+ import type { ITrackItem } from "@designcombo/types";
+ import type { PreviewItemPayload } from "@video-editor/contract/iframe/from-parent";
++import { resetEditorForNewProject } from "../state/reset-editor";
+ import { resolvePreviewSource } from "./preview-source-api";
+ 
+ export type ExternalMetadata = {
+@@ -374,4 +375,5 @@ export const clearProject = (stateManager: StateManager) => {
+ 			kind: "design:load",
+ 		},
+ 	);
++	resetEditorForNewProject();
+ };
+diff --git a/apps/frontend/src/features/editor/hooks/use-active-item.ts b/apps/frontend/src/features/editor/hooks/use-active-item.ts
+deleted file mode 100644
+index 2c5e591..0000000
+--- a/apps/frontend/src/features/editor/hooks/use-active-item.ts
++++ /dev/null
+@@ -1,12 +0,0 @@
+-import type { ITrackItem } from "@designcombo/types";
+-import useCompositionStore from "../store/use-composition-store";
+-import useSelectionStore from "../store/use-selection-store";
+-
+-const useActiveItem = (): ITrackItem | null => {
+-	const activeIds = useSelectionStore((s) => s.activeIds);
+-	const trackItemsMap = useCompositionStore((s) => s.trackItemsMap);
+-	if (activeIds.length !== 1) return null;
+-	return trackItemsMap[activeIds[0]] ?? null;
+-};
+-
+-export default useActiveItem;
+diff --git a/apps/frontend/src/features/editor/hooks/use-keyboard-shortcuts.ts b/apps/frontend/src/features/editor/hooks/use-keyboard-shortcuts.ts
+index 6f2f0f0..2eec23a 100644
+--- a/apps/frontend/src/features/editor/hooks/use-keyboard-shortcuts.ts
++++ b/apps/frontend/src/features/editor/hooks/use-keyboard-shortcuts.ts
+@@ -16,7 +16,6 @@ import { PLAYER_SEEK, PLAYER_TOGGLE_PLAY } from "../constants/events";
+ import useCompositionStore from "../store/use-composition-store";
+ import useEditorRefs from "../store/use-editor-refs";
+ import useLayoutStore from "../store/use-layout-store";
+-import useSelectionStore from "../store/use-selection-store";
+ import useTimelineViewStore from "../store/use-timeline-view-store";
+ import { getTargetById } from "../utils/target";
+ import { getCurrentTime } from "../utils/time";
+@@ -32,7 +31,7 @@ const useKeyboardShortcuts = () => {
+ 	const { playerRef, sceneMoveableRef } = useEditorRefs(
+ 		useShallow((s) => ({ playerRef: s.playerRef, sceneMoveableRef: s.sceneMoveableRef })),
+ 	);
+-	const activeIds = useSelectionStore((s) => s.activeIds);
++	const activeIds = useCompositionStore((s) => s.activeIds);
+ 	const trackItemsMap = useCompositionStore((s) => s.trackItemsMap);
+ 	const scale = useTimelineViewStore((s) => s.scale);
+ 
+diff --git a/apps/frontend/src/features/editor/hooks/use-state-manager-events.ts b/apps/frontend/src/features/editor/hooks/use-state-manager-events.ts
+index d76a68b..6223594 100644
+--- a/apps/frontend/src/features/editor/hooks/use-state-manager-events.ts
++++ b/apps/frontend/src/features/editor/hooks/use-state-manager-events.ts
+@@ -4,7 +4,6 @@ import { useEffect } from "react";
+ import { audioDataManager } from "../player/lib/audio-data";
+ import type { ICompositionStore } from "../store/use-composition-store";
+ import useCompositionStore from "../store/use-composition-store";
+-import useSelectionStore from "../store/use-selection-store";
+ import type { ITimelineViewStore } from "../store/use-timeline-view-store";
+ import useTimelineViewStore from "../store/use-timeline-view-store";
+ 
+@@ -12,6 +11,7 @@ const COMPOSITION_KEYS = [
+ 	"tracks",
+ 	"trackItemIds",
+ 	"trackItemsMap",
++	"activeIds",
+ 	"duration",
+ 	"fps",
+ 	"background",
+@@ -20,36 +20,28 @@ const COMPOSITION_KEYS = [
+ 	"compositions",
+ ] as const satisfies ReadonlyArray<keyof ICompositionStore>;
+ 
+-const SELECTION_KEYS = ["activeIds"] as const;
+-
+ const TIMELINE_VIEW_KEYS = ["scale", "scroll"] as const satisfies ReadonlyArray<
+ 	keyof ITimelineViewStore
+ >;
+ 
+ type CompositionPatch = Partial<Pick<ICompositionStore, (typeof COMPOSITION_KEYS)[number]>>;
+ 
+-type SelectionPatch = Pick<{ activeIds: string[] }, "activeIds">;
+-
+ type TimelineViewPatch = Partial<Pick<ITimelineViewStore, (typeof TIMELINE_VIEW_KEYS)[number]>>;
+ 
+ const COMPOSITION_FIELDS: ReadonlySet<string> = new Set(COMPOSITION_KEYS);
+-const SELECTION_FIELDS: ReadonlySet<string> = new Set(SELECTION_KEYS);
+ const TIMELINE_VIEW_FIELDS: ReadonlySet<string> = new Set(TIMELINE_VIEW_KEYS);
+ 
+ const routeStateUpdate = (newState: Record<string, unknown>) => {
+ 	const composition: Record<string, unknown> = {};
+-	const selection: Record<string, unknown> = {};
+ 	const timelineView: Record<string, unknown> = {};
+ 
+ 	for (const [key, value] of Object.entries(newState)) {
+ 		if (COMPOSITION_FIELDS.has(key)) composition[key] = value;
+-		else if (SELECTION_FIELDS.has(key)) selection[key] = value;
+ 		else if (TIMELINE_VIEW_FIELDS.has(key)) timelineView[key] = value;
+ 	}
+ 
+ 	if (Object.keys(composition).length)
+ 		useCompositionStore.setState(composition as CompositionPatch);
+-	if (Object.keys(selection).length) useSelectionStore.setState(selection as SelectionPatch);
+ 	if (Object.keys(timelineView).length)
+ 		useTimelineViewStore.setState(timelineView as TimelineViewPatch);
+ };
+diff --git a/apps/frontend/src/features/editor/hooks/use-timeline-events.ts b/apps/frontend/src/features/editor/hooks/use-timeline-events.ts
+index 26244c3..c621fb8 100644
+--- a/apps/frontend/src/features/editor/hooks/use-timeline-events.ts
++++ b/apps/frontend/src/features/editor/hooks/use-timeline-events.ts
+@@ -12,7 +12,6 @@ import {
+ } from "../constants/events";
+ import useCompositionStore from "../store/use-composition-store";
+ import useEditorRefs from "../store/use-editor-refs";
+-import useSelectionStore from "../store/use-selection-store";
+ import { getSafeCurrentFrame } from "../utils/time";
+ 
+ const useTimelineEvents = () => {
+@@ -67,7 +66,7 @@ const useTimelineEvents = () => {
+ 
+ 		const selectionSubscription = selectionEvents.subscribe((obj) => {
+ 			if (obj.key === LAYER_SELECTION) {
+-				useSelectionStore.setState({
++				useCompositionStore.setState({
+ 					activeIds: obj.value?.payload.activeIds,
+ 				});
+ 			}
+diff --git a/apps/frontend/src/features/editor/hooks/use-update-ansestors.tsx b/apps/frontend/src/features/editor/hooks/use-update-ansestors.tsx
+index 4937103..706e2a2 100644
+--- a/apps/frontend/src/features/editor/hooks/use-update-ansestors.tsx
++++ b/apps/frontend/src/features/editor/hooks/use-update-ansestors.tsx
+@@ -3,7 +3,6 @@ import { ENTER_EDIT_MODE } from "@designcombo/state";
+ import type { PlayerRef } from "@remotion/player";
+ import { type RefObject, useEffect } from "react";
+ import useCompositionStore from "../store/use-composition-store";
+-import useSelectionStore from "../store/use-selection-store";
+ import { getTargetById, getTypeFromClassName } from "../utils/target";
+ 
+ export default function useUpdateAnsestors({
+@@ -13,8 +12,7 @@ export default function useUpdateAnsestors({
+ 	playing: boolean;
+ 	playerRef: RefObject<PlayerRef> | null;
+ }) {
+-	const { trackItemIds } = useCompositionStore();
+-	const { activeIds } = useSelectionStore();
++	const { trackItemIds, activeIds } = useCompositionStore();
+ 
+ 	useEffect(() => {
+ 		if (!playing) {
+diff --git a/apps/frontend/src/features/editor/player/items/caption-animations.ts b/apps/frontend/src/features/editor/player/items/caption-animations.ts
+index 064a02d..3cf1382 100644
+--- a/apps/frontend/src/features/editor/player/items/caption-animations.ts
++++ b/apps/frontend/src/features/editor/player/items/caption-animations.ts
+@@ -299,3 +299,7 @@ export const ANIMATION_CONFIGS: Record<string, AnimationConfig> = {
+ // Cache for rotation values
+ export const captionRotationCache = new Map<string, number>();
+ export const rotationOptions = [-10, 0, 10];
++
++export const clearCaptionRotationCache = () => {
++	captionRotationCache.clear();
++};
+diff --git a/apps/frontend/src/features/editor/player/lib/audio-data.ts b/apps/frontend/src/features/editor/player/lib/audio-data.ts
+index ee84b38..05adcdc 100644
+--- a/apps/frontend/src/features/editor/player/lib/audio-data.ts
++++ b/apps/frontend/src/features/editor/player/lib/audio-data.ts
+@@ -172,6 +172,13 @@ class AudioDataManager {
+ 
+ 		return result;
+ 	}
++
++	public reset() {
++		this.items = [];
++		this.dataBars = [];
++		this.audioDatas = {};
++		this.frameCache.clear();
++	}
+ }
+ 
+ export const audioDataManager = new AudioDataManager();
+diff --git a/apps/frontend/src/features/editor/player/player.tsx b/apps/frontend/src/features/editor/player/player.tsx
+index 5a07909..ff693a1 100644
+--- a/apps/frontend/src/features/editor/player/player.tsx
++++ b/apps/frontend/src/features/editor/player/player.tsx
+@@ -11,6 +11,7 @@ const Player = () => {
+ 
+ 	useEffect(() => {
+ 		setPlayerRef(playerRef as React.RefObject<PlayerRef>);
++		return () => setPlayerRef(null);
+ 	}, [setPlayerRef]);
+ 
+ 	return (
+diff --git a/apps/frontend/src/features/editor/scene/interactions.tsx b/apps/frontend/src/features/editor/scene/interactions.tsx
+index 1ff588b..5108913 100644
+--- a/apps/frontend/src/features/editor/scene/interactions.tsx
++++ b/apps/frontend/src/features/editor/scene/interactions.tsx
+@@ -9,7 +9,6 @@ import { useShallow } from "zustand/react/shallow";
+ import useCompositionStore from "../store/use-composition-store";
+ import useEditorRefs from "../store/use-editor-refs";
+ import useLayoutStore from "../store/use-layout-store";
+-import useSelectionStore from "../store/use-selection-store";
+ import { getIdFromClassName } from "../utils/scene";
+ import {
+ 	emptySelection,
+@@ -60,7 +59,7 @@ export function SceneInteractions({
+ 	const [selection, setSelection] = useState<Selection>();
+ 	const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+ 	const [iconPos, setIconPos] = useState<{ x: number; y: number } | null>(null);
+-	const activeIds = useSelectionStore((s) => s.activeIds);
++	const activeIds = useCompositionStore((s) => s.activeIds);
+ 	const { setControlItemOpen } = useLayoutStore(
+ 		useShallow((s) => ({ setControlItemOpen: s.setControlItemOpen })),
+ 	);
+@@ -251,7 +250,7 @@ export function SceneInteractions({
+ 	useEffect(() => {
+ 		const activeSelectionSubscription = stateManager.subscribeToActiveIds((newState) => {
+ 			const { activeIds: newIds } = newState as { activeIds: string[] };
+-			useSelectionStore.setState(newState as { activeIds: string[] });
++			useCompositionStore.setState(newState as { activeIds: string[] });
+ 			if (newIds.length === 1) {
+ 				setTimeout(() => setIconPos(computeIconPos(newIds[0])), 0);
+ 			} else {
+@@ -270,7 +269,8 @@ export function SceneInteractions({
+ 
+ 	useEffect(() => {
+ 		setSceneMoveableRef(moveableRef as React.RefObject<Moveable>);
+-	}, [moveableRef]);
++		return () => setSceneMoveableRef(null);
++	}, [setSceneMoveableRef]);
+ 	return (
+ 		<>
+ 			{contextMenu && (
+diff --git a/apps/frontend/src/features/editor/store/use-composition-store.ts b/apps/frontend/src/features/editor/store/use-composition-store.ts
+index 811cc2e..0e66767 100644
+--- a/apps/frontend/src/features/editor/store/use-composition-store.ts
++++ b/apps/frontend/src/features/editor/store/use-composition-store.ts
+@@ -5,6 +5,7 @@ export interface ICompositionStore {
+ 	tracks: ITrack[];
+ 	trackItemIds: string[];
+ 	trackItemsMap: Record<string, ITrackItem>;
++	activeIds: string[];
+ 	duration: number;
+ 	fps: number;
+ 	background: {
+@@ -23,6 +24,7 @@ const useCompositionStore = create<ICompositionStore>((set) => ({
+ 	tracks: [],
+ 	trackItemIds: [],
+ 	trackItemsMap: {},
++	activeIds: [],
+ 	duration: 1000,
+ 	fps: 30,
+ 	background: {
+diff --git a/apps/frontend/src/features/editor/store/use-crop-store.ts b/apps/frontend/src/features/editor/store/use-crop-store.ts
+index b324ca9..709c651 100644
+--- a/apps/frontend/src/features/editor/store/use-crop-store.ts
++++ b/apps/frontend/src/features/editor/store/use-crop-store.ts
+@@ -101,6 +101,12 @@ const useCropStore = create<ICropState>((set) => ({
+ 			});
+ 			set({ element: image, scale: scaleFactor });
+ 		};
++		image.onerror = () => {
++			disposeMediaElement(image);
++			if (useCropStore.getState().element === image) {
++				set({ element: undefined, fileLoading: false });
++			}
++		};
+ 		image.src = src;
+ 	},
+ 	loadVideo: (src: string) => {
+@@ -165,6 +171,13 @@ const useCropStore = create<ICropState>((set) => ({
+ 			}
+ 		};
+ 
++		video.onerror = () => {
++			disposeMediaElement(video);
++			if (useCropStore.getState().element === video) {
++				set({ element: undefined, fileLoading: false });
++			}
++		};
++
+ 		video.src = src;
+ 	},
+ }));
+diff --git a/apps/frontend/src/features/editor/store/use-editor-refs.ts b/apps/frontend/src/features/editor/store/use-editor-refs.ts
+index 0ddd8ee..4847f75 100644
+--- a/apps/frontend/src/features/editor/store/use-editor-refs.ts
++++ b/apps/frontend/src/features/editor/store/use-editor-refs.ts
+@@ -8,8 +8,8 @@ interface IEditorRefsStore {
+ 	sceneMoveableRef: React.RefObject<Moveable> | null;
+ 	timeline: Timeline | null;
+ 	setPlayerRef: (ref: React.RefObject<PlayerRef> | null) => void;
+-	setSceneMoveableRef: (ref: React.RefObject<Moveable>) => void;
+-	setTimeline: (timeline: Timeline) => void;
++	setSceneMoveableRef: (ref: React.RefObject<Moveable> | null) => void;
++	setTimeline: (timeline: Timeline | null) => void;
+ }
+ 
+ const useEditorRefs = create<IEditorRefsStore>((set) => ({
+diff --git a/apps/frontend/src/features/editor/store/use-selection-store.ts b/apps/frontend/src/features/editor/store/use-selection-store.ts
+deleted file mode 100644
+index ea958c8..0000000
+--- a/apps/frontend/src/features/editor/store/use-selection-store.ts
++++ /dev/null
+@@ -1,11 +0,0 @@
+-import { create } from "zustand";
+-
+-interface ISelectionStore {
+-	activeIds: string[];
+-}
+-
+-const useSelectionStore = create<ISelectionStore>(() => ({
+-	activeIds: [],
+-}));
+-
+-export default useSelectionStore;
+diff --git a/apps/frontend/src/features/editor/store/use-upload-store.ts b/apps/frontend/src/features/editor/store/use-upload-store.ts
+index f389f26..3fa5319 100644
+--- a/apps/frontend/src/features/editor/store/use-upload-store.ts
++++ b/apps/frontend/src/features/editor/store/use-upload-store.ts
+@@ -28,8 +28,11 @@ interface IUploadStore {
+ 	removeUpload: (id: string) => void;
+ 	uploads: any[];
+ 	setUploads: (uploads: any[] | ((prev: any[]) => any[])) => void;
++	resetUploadStore: () => void;
+ }
+ 
++const MAX_PERSISTED_UPLOADS = 50;
++
+ const useUploadStore = create<IUploadStore>()(
+ 	persist(
+ 		(set, get) => ({
+@@ -135,10 +138,23 @@ const useUploadStore = create<IUploadStore>()(
+ 							? (uploads as (prev: any[]) => any[])(state.uploads)
+ 							: uploads,
+ 				})),
++			resetUploadStore: () =>
++				set((state) => {
++					for (const upload of state.activeUploads) {
++						if (upload.removeTimeoutId) clearTimeout(upload.removeTimeoutId);
++					}
++					return {
++						files: [],
++						pendingUploads: [],
++						activeUploads: [],
++					};
++				}),
+ 		}),
+ 		{
+ 			name: "upload-store",
+-			partialize: (state) => ({ uploads: state.uploads }),
++			partialize: (state) => ({
++				uploads: state.uploads.slice(-MAX_PERSISTED_UPLOADS),
++			}),
+ 		},
+ 	),
+ );
+diff --git a/apps/frontend/src/features/editor/timeline/header.tsx b/apps/frontend/src/features/editor/timeline/header.tsx
+index e4c338d..cfdb851 100644
+--- a/apps/frontend/src/features/editor/timeline/header.tsx
++++ b/apps/frontend/src/features/editor/timeline/header.tsx
+@@ -16,9 +16,9 @@ import { PLAYER_PAUSE, PLAYER_PLAY } from "../constants/events";
+ import { useCurrentPlayerFrame } from "../hooks/use-current-frame";
+ import { useTimelineOffsetX } from "../hooks/use-timeline-offset";
+ import useUpdateAnsestors from "../hooks/use-update-ansestors";
++import { useHasSelection } from "../store/selectors";
+ import useCompositionStore from "../store/use-composition-store";
+ import useEditorRefs from "../store/use-editor-refs";
+-import useSelectionStore from "../store/use-selection-store";
+ import useTimelineViewStore from "../store/use-timeline-view-store";
+ import { frameToTimeString, getCurrentTime, timeToString } from "../utils/time";
+ import {
+@@ -80,7 +80,7 @@ const Header = () => {
+ 	const { duration, fps } = useCompositionStore();
+ 	const { scale } = useTimelineViewStore();
+ 	const { playerRef } = useEditorRefs();
+-	const { activeIds } = useSelectionStore();
++	const hasSelection = useHasSelection();
+ 	const isLargeScreen = useIsMediumScreen();
+ 	useUpdateAnsestors({ playing, playerRef });
+ 
+@@ -165,7 +165,7 @@ const Header = () => {
+ 						<Tooltip>
+ 							<TooltipTrigger asChild>
+ 								<Button
+-									disabled={!activeIds.length}
++									disabled={!hasSelection}
+ 									onClick={doActiveDelete}
+ 									variant={"ghost"}
+ 									size={isLargeScreen ? "default" : "icon"}
+@@ -181,7 +181,7 @@ const Header = () => {
+ 						<Tooltip>
+ 							<TooltipTrigger asChild>
+ 								<Button
+-									disabled={!activeIds.length}
++									disabled={!hasSelection}
+ 									onClick={doActiveSplit}
+ 									variant={"ghost"}
+ 									size={isLargeScreen ? "default" : "icon"}
+@@ -196,7 +196,7 @@ const Header = () => {
+ 						<Tooltip>
+ 							<TooltipTrigger asChild>
+ 								<Button
+-									disabled={!activeIds.length}
++									disabled={!hasSelection}
+ 									onClick={() => {
+ 										dispatch(LAYER_CLONE);
+ 									}}
+diff --git a/apps/frontend/src/features/editor/timeline/items/audio.ts b/apps/frontend/src/features/editor/timeline/items/audio.ts
+index ac9f524..57cae57 100644
+--- a/apps/frontend/src/features/editor/timeline/items/audio.ts
++++ b/apps/frontend/src/features/editor/timeline/items/audio.ts
+@@ -264,6 +264,13 @@ class Audio extends Trimmable {
+ 		this.bars = this.getBars(0, 0) as any;
+ 		this.onScrollChange({ scrollLeft: this.scrollLeft });
+ 	}
++
++	public destroy(): void {
++		this.offscreenCanvas = null;
++		this.offscreenCtx = null;
++		this.barData = undefined;
++		this.bars = [];
++	}
+ }
+ 
+ export default Audio;
+diff --git a/apps/frontend/src/features/editor/timeline/items/timeline.ts b/apps/frontend/src/features/editor/timeline/items/timeline.ts
+index 3364472..71e5153 100644
+--- a/apps/frontend/src/features/editor/timeline/items/timeline.ts
++++ b/apps/frontend/src/features/editor/timeline/items/timeline.ts
+@@ -36,7 +36,7 @@ class Timeline extends TimelineBase {
+ 
+ 	public purge(): void {
+ 		for (const obj of this.getObjects()) {
+-			if (obj instanceof Video) {
++			if (obj instanceof Video || obj instanceof Audio) {
+ 				obj.destroy();
+ 			}
+ 		}
+diff --git a/apps/frontend/src/features/editor/timeline/items/video.ts b/apps/frontend/src/features/editor/timeline/items/video.ts
+index 8d9aff0..d784eec 100644
+--- a/apps/frontend/src/features/editor/timeline/items/video.ts
++++ b/apps/frontend/src/features/editor/timeline/items/video.ts
+@@ -335,6 +335,10 @@ class Video extends Trimmable {
+ 					this.thumbnailCache.setThumbnail(thumbnail.ts, img);
+ 					resolve();
+ 				};
++				img.onerror = () => {
++					URL.revokeObjectURL(img.src);
++					resolve();
++				};
+ 			});
+ 		});
+ 
+diff --git a/apps/frontend/src/features/editor/timeline/timeline.tsx b/apps/frontend/src/features/editor/timeline/timeline.tsx
+index 7c32048..1174389 100644
+--- a/apps/frontend/src/features/editor/timeline/timeline.tsx
++++ b/apps/frontend/src/features/editor/timeline/timeline.tsx
+@@ -102,7 +102,7 @@ const Timeline = ({ stateManager }: { stateManager: StateManager }) => {
+ 		const canvas = canvasRef.current;
+ 		if (!canvas) return;
+ 		for (const obj of canvas.getObjects()) {
+-			if (obj instanceof Video && !trackItemIds.includes(obj.id)) {
++			if ((obj instanceof Video || obj instanceof Audio) && !trackItemIds.includes(obj.id)) {
+ 				obj.destroy();
+ 			}
+ 		}
+diff --git a/apps/server/CLAUDE.md b/apps/server/CLAUDE.md
+index 45d5a40..f3eea0f 100644
+--- a/apps/server/CLAUDE.md
++++ b/apps/server/CLAUDE.md
+@@ -26,15 +26,15 @@ node --env-file=.env src/worker.ts
+ 
+ ## Entry & Bootstrap
+ 
+-- `src/index.ts` — API entrypoint: parses env, builds `System`, registers shutdown handlers.
+-- `src/worker.ts` — Worker entrypoint: parses env, builds `Worker`, registers shutdown handlers.
++- `src/index.ts` — API entrypoint: calls `parseApiEnv()`, builds `System`, registers shutdown handlers.
++- `src/worker.ts` — Worker entrypoint: calls `parseWorkerEnv()`, builds `Worker`, registers shutdown handlers.
+ - `src/bootstrap/system.ts` — `System` class for the API: orchestrates publisher `connect()` → `Server.start()` → mock-vod fixture-window probe (local dev only). Shutdown: server stop → publisher drain (5s) → publisher close.
+ - `src/bootstrap/container.ts` — `buildApiContainer` + `buildWorkerContainer`. API gets HTTP-facing services + `RenderCommandPort`; worker gets `VideoRenderUseCase`, `RenderRequestedConsumer`, `RenderDLQConsumer`.
+ - `src/bootstrap/server.ts` — `Server` class wrapped by `System`: Fastify plugins + controllers + `GET /health`.
+ - `src/bootstrap/worker.ts` — `Worker` class: opens AMQP consumers (each on its own channel), runs the probe server, drains in-flight work on SIGTERM.
+ - `src/bootstrap/workerProbeServer.ts` — `/health`, `/ready`, `/metrics` (Prometheus).
+ - `src/bootstrap/shutdown.ts` — `createShutdown()` factory: registers SIGTERM/SIGINT handlers, used by both entrypoints.
+-- `src/config/env.ts` — Zod-validated env schema with defaults.
++- `src/config/env.ts` — Zod-validated env schemas (`commonEnvSchema` / `apiEnvSchema` / `workerEnvSchema`) with defaults; exports `parseApiEnv` + `parseWorkerEnv`.
+ 
+ ## Architecture: Hexagonal (Ports & Adapters)
+ 
+@@ -127,7 +127,9 @@ HTTP route schemas + their value types (`OverlayType`, `TimeRange`, `VideoMetada
+ 
+ ## Environment Variables
+ 
+-All validated by Zod in `src/config/env.ts` — that file is the source of truth; keep this table in sync.
++All validated by Zod in `src/config/env.ts` — that file is the source of truth; keep this table in sync. The schema is split into three Zod objects: `commonEnvSchema` (loaded by both processes), `apiEnvSchema` (extends common, loaded by `parseApiEnv()`), and `workerEnvSchema` (extends common, loaded by `parseWorkerEnv()`). Unknown env keys are silently stripped — the worker pod can safely receive API-only env vars from a shared Secret.
++
++### Common (both API and Worker)
+ 
+ **Observability**
+ 
+@@ -137,14 +139,6 @@ All validated by Zod in `src/config/env.ts` — that file is the source of truth
+ | `SERVICE_VERSION` | `1.0.0` | Logger/OTel service version |
+ | `LOG_LEVEL` | `info` | Pino log level |
+ | `OTEL_ENDPOINT` | optional | OTel collector endpoint. OTel disabled when absent |
+-| `PYROSCOPE_SERVER_ADDRESS` | optional | Pyroscope profiling endpoint |
+-
+-**Server (API)**
+-
+-| Var | Default | Description |
+-|-----|---------|-------------|
+-| `PORT` | `4001` | HTTP port (API) |
+-| `HOST` | `127.0.0.1` | Bind host |
+ 
+ **FFmpeg / transcoding**
+ 
+@@ -153,33 +147,21 @@ All validated by Zod in `src/config/env.ts` — that file is the source of truth
+ | `FFMPEG_PRESET` | `veryfast` | FFmpeg encoding preset |
+ | `FFMPEG_CRF` | `20` | FFmpeg CRF quality |
+ | `FFMPEG_AUDIO_BITRATE` | `192k` | FFmpeg audio bitrate |
+-| `FFMPEG_MAX_CONCURRENT` | `2` | Max concurrent FFmpeg processes |
++| `FFMPEG_MAX_CONCURRENT` | `2` | Max concurrent FFmpeg processes — drives the `FfmpegRunner` semaphore wired through DI |
+ | `MIN_TRANSCODE_SEGMENT_SECONDS` | `0.35` | Minimum segment length before transcoding |
+ 
+-**Preview (MPD → HLS)**
++**MPD / source transcoding**
+ 
+ | Var | Default | Description |
+ |-----|---------|-------------|
+-| `CORE_BASE_URL` | required | Core service base URL. **Includes the `/private` prefix** — real Core groups auth-required endpoints there, so the adapter appends `/channels/:id/play` to it. Dev: `http://localhost:8002/private` |
+-| `MOCK_VOD_BASE_URL` | optional | Boot-only — used to log the active mock-vod fixture window when `CORE_BASE_URL` is localhost. Defaults to `http://localhost:5050` if unset |
+-| `SERVER_BASE_URL` | required | Public server URL (used in signed segment URLs) |
+-| `PREVIEW_SIGNING_SECRET` | required | HMAC-SHA256 secret used to sign segment-proxy URLs. Min 32 chars. Without this, `/editor/segment` would be an SSRF vector |
+-| `MAX_PREVIEW_DURATION_MS` | `3600000` | Max preview window length (1h) |
+-| `PREVIEW_JOB_TTL_SECONDS` | `86400` | Preview-job retention TTL (24h) |
+-| `S3_PREVIEW_PREFIX` | `preview` | Key prefix for preview playlists/segments |
+-
+-**MPD transcoding (preview)**
+-
+-| Var | Default | Description |
+-|-----|---------|-------------|
+-| `ENABLE_MPD_RESTRICTIONS` | `false` | Apply preview-source restrictions when MPD is multi-period/multi-AS |
+-| `TRANSCODE_TIMEOUT_MS` | `7200000` | MPD transcode hard timeout (2h) |
++| `ENABLE_MPD_RESTRICTIONS` | `false` | Apply restrictions when MPD is multi-period/multi-AS |
++| `TRANSCODE_TIMEOUT_MS` | `7200000` | MPD/HLS/audio transcode hard timeout (2h) |
+ | `MAX_TEMP_FILE_SIZE_MB` | `5000` | MPD transcode temp-file size cap |
+ | `MPD_TRANSCODE_CRF_MULTI` | `10` | CRF when MPD has multiple representations |
+ | `MPD_TRANSCODE_CRF_SINGLE` | `18` | CRF when MPD has a single representation |
+ | `MPD_TRANSCODE_PRESET` | `medium` | FFmpeg preset for MPD transcoding |
+ 
+-**S3 / MinIO**
++**S3 / MinIO (shared connection)**
+ 
+ | Var | Default | Description |
+ |-----|---------|-------------|
+@@ -189,9 +171,7 @@ All validated by Zod in `src/config/env.ts` — that file is the source of truth
+ | `S3_FORCE_PATH_STYLE` | `true` | Path-style addressing (required for MinIO) |
+ | `S3_ACCESS_KEY_ID` | required | S3 access key |
+ | `S3_SECRET_ACCESS_KEY` | required | S3 secret |
+-| `S3_UPLOAD_PREFIX` | `uploads` | Key prefix for uploads |
+-| `S3_OUTPUT_PREFIX` | `output` | Key prefix for processed output |
+-| `S3_AUTO_CREATE_BUCKET` | `true` | Auto-create bucket on startup |
++| `S3_OUTPUT_PREFIX` | `output` | Key prefix for processed output. **Worker writes; API derives idempotency keys.** Must match across both pods |
+ | `RENDER_URL_EXPIRY_SECONDS` | `86400` | TTL for signed render output URLs |
+ 
+ **Messaging**
+@@ -199,12 +179,29 @@ All validated by Zod in `src/config/env.ts` — that file is the source of truth
+ | Var | Default | Description |
+ |-----|---------|-------------|
+ | `RABBITMQ_URL` | required | AMQP connection URL — neither API nor worker starts without this |
+-| `COMMAND_PUBLISH_CONFIRM_TIMEOUT_MS` | `10000` | Per-attempt broker-confirm timeout for `publishCommand` (POST /render). 3 attempts; exhaustion → 503 |
++| `COMMAND_PUBLISH_CONFIRM_TIMEOUT_MS` | `10000` | Per-attempt broker-confirm timeout for `publishCommand` (POST /render). 3 attempts; exhaustion → 503. Common because both processes share `buildPublisher()` |
+ | `EVENT_PUBLISH_CONFIRM_TIMEOUT_MS` | `30000` | Per-attempt broker-confirm timeout for `publishExport*` events. Larger than the command timeout because confirm round-trip during recovery may exceed 10s. On exhaustion: swallowed (caller never sees the error) |
+ | `AMQP_INITIAL_CONNECT_TIMEOUT_MS` | `15000` | Race timeout on initial broker connect. Required because `maxRetries: Infinity` would otherwise hang the process forever on unreachable brokers and prevent k8s from CrashLoopBackOff'ing the pod |
+-| `RENDER_REQUEST_TTL_MS` | optional | If set, `x-message-ttl` on the `render.requested` queue |
++| `RENDER_REQUEST_TTL_MS` | optional | If set, `x-message-ttl` on the `render.requested` queue. **Common** because both API and worker assert topology — mismatch yields `PRECONDITION_FAILED` |
++
++### API-only
++
++| Var | Default | Description |
++|-----|---------|-------------|
++| `PORT` | `4001` | HTTP port |
++| `HOST` | `127.0.0.1` | Bind host |
++| `CORE_BASE_URL` | required | Core service base URL. **Includes the `/private` prefix** — real Core groups auth-required endpoints there, so the adapter appends `/channels/:id/play` to it. Dev: `http://localhost:8002/private` |
++| `MOCK_VOD_BASE_URL` | optional | Boot-only — used to log the active mock-vod fixture window when `CORE_BASE_URL` is localhost. Defaults to `http://localhost:5050` if unset |
++| `SERVER_BASE_URL` | required | Public server URL (used in signed segment URLs) |
++| `PREVIEW_SIGNING_SECRET` | required | HMAC-SHA256 secret used to sign segment-proxy URLs. Min 32 chars. Without this, `/editor/segment` would be an SSRF vector |
++| `MAX_PREVIEW_DURATION_MS` | `3600000` | Max preview window length (1h) |
++| `PREVIEW_JOB_TTL_SECONDS` | `86400` | Preview-job retention TTL (24h) |
++| `S3_PREVIEW_PREFIX` | `preview` | Key prefix for preview playlists/segments |
++| `S3_UPLOAD_PREFIX` | `uploads` | Key prefix for direct-to-S3 uploads |
++| `UPLOAD_MAX_SIZE_BYTES` | `524288000` | Max accepted upload size (500 MB). Enforced server-side AND bound into the presigned PUT via signed Content-Length |
++| `S3_AUTO_CREATE_BUCKET` | `true` | Auto-create bucket on API startup |
+ 
+-**Worker**
++### Worker-only
+ 
+ | Var | Default | Description |
+ |-----|---------|-------------|
+diff --git a/apps/server/README.md b/apps/server/README.md
+index 027378c..fbdad1c 100644
+--- a/apps/server/README.md
++++ b/apps/server/README.md
+@@ -157,14 +157,18 @@ External teams subscribe to events by binding their own queue to the `video-edit
+ 
+ ## Environment
+ 
+-All variables are validated by Zod in [`src/config/env.ts`](./src/config/env.ts) — that file is the source of truth.
++All variables are validated by Zod in [`src/config/env.ts`](./src/config/env.ts) — that file is the source of truth. The schema is split into three Zod objects: `commonEnvSchema` (loaded by both processes), `apiEnvSchema` (extends common, loaded by `parseApiEnv()`), and `workerEnvSchema` (extends common, loaded by `parseWorkerEnv()`). Unknown env keys are silently stripped.
+ 
+-### Server (API)
++## Common (both API and Worker)
++
++### Observability
+ 
+ | Variable | Default | Description |
+ |---|---|---|
+-| `PORT` | `4001` | HTTP port (API) |
+-| `HOST` | `127.0.0.1` | Bind host |
++| `SERVICE_NAME` | `video-editor-server` | Logger / OTel service name |
++| `SERVICE_VERSION` | `1.0.0` | Logger / OTel service version |
++| `LOG_LEVEL` | `info` | Pino log level |
++| `OTEL_ENDPOINT` | optional | OTel collector endpoint. OTel is disabled when absent |
+ 
+ ### FFmpeg / transcoding
+ 
+@@ -173,33 +177,21 @@ All variables are validated by Zod in [`src/config/env.ts`](./src/config/env.ts)
+ | `FFMPEG_PRESET` | `veryfast` | Encoder preset |
+ | `FFMPEG_CRF` | `20` | Quality (lower = better) |
+ | `FFMPEG_AUDIO_BITRATE` | `192k` | Audio bitrate |
+-| `FFMPEG_MAX_CONCURRENT` | `2` | Max concurrent FFmpeg processes |
++| `FFMPEG_MAX_CONCURRENT` | `2` | Max concurrent FFmpeg processes — drives the `FfmpegRunner` semaphore wired through DI |
+ | `MIN_TRANSCODE_SEGMENT_SECONDS` | `0.35` | Minimum segment length before transcoding |
+ 
+-### Preview (MPD → HLS)
+-
+-| Variable | Default | Description |
+-|---|---|---|
+-| `CORE_BASE_URL` | required | Upstream Core base URL. **Includes the `/private` prefix.** Dev: `http://localhost:8002/private` |
+-| `MOCK_VOD_BASE_URL` | optional | Boot-only — logs the active mock-vod fixture window when `CORE_BASE_URL` is localhost. Defaults to `http://localhost:5050` |
+-| `SERVER_BASE_URL` | required | Public server URL — used in signed segment URLs |
+-| `PREVIEW_SIGNING_SECRET` | required | HMAC-SHA256 secret for `/editor/segment` URL signing. Min 32 chars. Without this, the segment proxy would be an SSRF vector |
+-| `MAX_PREVIEW_DURATION_MS` | `3600000` | Max preview window length (1h) |
+-| `PREVIEW_JOB_TTL_SECONDS` | `86400` | Preview-job retention TTL |
+-| `S3_PREVIEW_PREFIX` | `preview` | Key prefix for preview playlists/segments |
+-
+-### MPD transcoding (preview)
++### MPD / source transcoding
+ 
+ | Variable | Default | Description |
+ |---|---|---|
+-| `ENABLE_MPD_RESTRICTIONS` | `false` | Apply preview-source restrictions when MPD is multi-period/multi-AS |
+-| `TRANSCODE_TIMEOUT_MS` | `7200000` | MPD transcode hard timeout (2h) |
++| `ENABLE_MPD_RESTRICTIONS` | `false` | Apply restrictions when MPD is multi-period/multi-AS |
++| `TRANSCODE_TIMEOUT_MS` | `7200000` | MPD/HLS/audio transcode hard timeout (2h) |
+ | `MAX_TEMP_FILE_SIZE_MB` | `5000` | MPD transcode temp-file size cap |
+ | `MPD_TRANSCODE_CRF_MULTI` | `10` | CRF when MPD has multiple representations |
+ | `MPD_TRANSCODE_CRF_SINGLE` | `18` | CRF when MPD has a single representation |
+ | `MPD_TRANSCODE_PRESET` | `medium` | FFmpeg preset for MPD transcoding |
+ 
+-### S3 / MinIO
++### S3 / MinIO (shared connection)
+ 
+ | Variable | Default | Description |
+ |---|---|---|
+@@ -209,38 +201,42 @@ All variables are validated by Zod in [`src/config/env.ts`](./src/config/env.ts)
+ | `S3_FORCE_PATH_STYLE` | `true` | Path-style addressing (required for MinIO) |
+ | `S3_ACCESS_KEY_ID` | required | Access key |
+ | `S3_SECRET_ACCESS_KEY` | required | Secret |
+-| `S3_UPLOAD_PREFIX` | `uploads` | Key prefix for uploaded assets |
+-| `S3_OUTPUT_PREFIX` | `output` | Key prefix for render output |
+-| `S3_AUTO_CREATE_BUCKET` | `true` | Auto-create bucket on startup if missing |
++| `S3_OUTPUT_PREFIX` | `output` | Key prefix for render output. **Worker writes; API derives idempotency keys.** Must match across both pods |
+ | `RENDER_URL_EXPIRY_SECONDS` | `86400` | TTL for signed render output URLs |
+-| `UPLOAD_MAX_SIZE_BYTES` | `524288000` | Max accepted upload size (500 MB). Enforced server-side and bound into the presigned PUT |
+ 
+ ### Messaging
+ 
+ | Variable | Default | Description |
+ |---|---|---|
+ | `RABBITMQ_URL` | required | AMQP connection URL — neither API nor worker starts without it |
+-| `COMMAND_PUBLISH_CONFIRM_TIMEOUT_MS` | `10000` | Per-attempt broker-confirm timeout for `publishCommand` (3 retries; exhaustion → 503) |
++| `COMMAND_PUBLISH_CONFIRM_TIMEOUT_MS` | `10000` | Per-attempt broker-confirm timeout for `publishCommand` (3 retries; exhaustion → 503). Common because both processes share `buildPublisher()` |
+ | `EVENT_PUBLISH_CONFIRM_TIMEOUT_MS` | `30000` | Per-attempt broker-confirm timeout for event publishes |
+ | `AMQP_INITIAL_CONNECT_TIMEOUT_MS` | `15000` | Initial AMQP connect timeout |
+-| `RENDER_REQUEST_TTL_MS` | optional | If set, `x-message-ttl` on the `render.requested` queue |
++| `RENDER_REQUEST_TTL_MS` | optional | If set, `x-message-ttl` on the `render.requested` queue. Common because both processes assert topology |
+ 
+-### Worker
++## API-only
+ 
+ | Variable | Default | Description |
+ |---|---|---|
+-| `WORKER_CONCURRENCY` | `1` | AMQP prefetch + in-process render concurrency |
+-| `WORKER_PROBE_PORT` | `8081` | Probe + metrics port |
++| `PORT` | `4001` | HTTP port |
++| `HOST` | `127.0.0.1` | Bind host |
++| `CORE_BASE_URL` | required | Upstream Core base URL. **Includes the `/private` prefix.** Dev: `http://localhost:8002/private` |
++| `MOCK_VOD_BASE_URL` | optional | Boot-only — logs the active mock-vod fixture window when `CORE_BASE_URL` is localhost. Defaults to `http://localhost:5050` |
++| `SERVER_BASE_URL` | required | Public server URL — used in signed segment URLs |
++| `PREVIEW_SIGNING_SECRET` | required | HMAC-SHA256 secret for `/editor/segment` URL signing. Min 32 chars. Without this, the segment proxy would be an SSRF vector |
++| `MAX_PREVIEW_DURATION_MS` | `3600000` | Max preview window length (1h) |
++| `PREVIEW_JOB_TTL_SECONDS` | `86400` | Preview-job retention TTL |
++| `S3_PREVIEW_PREFIX` | `preview` | Key prefix for preview playlists/segments |
++| `S3_UPLOAD_PREFIX` | `uploads` | Key prefix for uploaded assets |
++| `UPLOAD_MAX_SIZE_BYTES` | `524288000` | Max accepted upload size (500 MB). Enforced server-side and bound into the presigned PUT |
++| `S3_AUTO_CREATE_BUCKET` | `true` | Auto-create bucket on API startup if missing |
+ 
+-### Observability
++## Worker-only
+ 
+ | Variable | Default | Description |
+ |---|---|---|
+-| `SERVICE_NAME` | `video-editor-server` | Logger / OTel service name |
+-| `SERVICE_VERSION` | `1.0.0` | Logger / OTel service version |
+-| `LOG_LEVEL` | `info` | Pino log level |
+-| `OTEL_ENDPOINT` | optional | OTel collector endpoint. OTel is disabled when absent |
+-| `PYROSCOPE_SERVER_ADDRESS` | optional | Pyroscope profiling endpoint |
++| `WORKER_CONCURRENCY` | `1` | AMQP prefetch + in-process render concurrency |
++| `WORKER_PROBE_PORT` | `8081` | Probe + metrics port |
+ 
+ ## Tests
+ 
+diff --git a/apps/server/src/bootstrap/__tests__/system.test.ts b/apps/server/src/bootstrap/__tests__/system.test.ts
+index ee1f080..dc8d382 100644
+--- a/apps/server/src/bootstrap/__tests__/system.test.ts
++++ b/apps/server/src/bootstrap/__tests__/system.test.ts
+@@ -1,6 +1,6 @@
+ import { Logger } from "@ztube/observability";
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+-import type { EnvConfig } from "../../config/env.ts";
++import type { ApiEnvConfig } from "../../config/env.ts";
+ import type { ApiContainer } from "../container.ts";
+ import type { Server } from "../server.ts";
+ import { System } from "../system.ts";
+@@ -16,7 +16,7 @@ interface ServerFake {
+ 	stop: ReturnType<typeof vi.fn>;
+ }
+ 
+-const makeConfig = (): EnvConfig => ({}) as unknown as EnvConfig;
++const makeConfig = (): ApiEnvConfig => ({}) as unknown as ApiEnvConfig;
+ 
+ const makePublisher = (): PublisherFake => ({
+ 	connect: vi.fn().mockResolvedValue(undefined),
+diff --git a/apps/server/src/bootstrap/container.ts b/apps/server/src/bootstrap/container.ts
+index ef0df1a..3a7fbef 100644
+--- a/apps/server/src/bootstrap/container.ts
++++ b/apps/server/src/bootstrap/container.ts
+@@ -1,5 +1,5 @@
+ import { createZMonitor } from "@ztube/observability";
+-import type { EnvConfig } from "../config/env.ts";
++import type { ApiEnvConfig, CommonEnvConfig, WorkerEnvConfig } from "../config/env.ts";
+ import { GeneratePreviewUseCase } from "../features/preview/application/use-cases/GeneratePreviewUseCase.ts";
+ import { RenderDLQConsumer } from "../features/render/adapters/inbound/amqp/RenderDLQConsumer.ts";
+ import { RenderRequestedConsumer } from "../features/render/adapters/inbound/amqp/RenderRequestedConsumer.ts";
+@@ -8,11 +8,12 @@ import type { RenderCommandPort } from "../features/render/application/ports/out
+ import { VideoRenderUseCase } from "../features/render/application/use-cases/VideoRenderUseCase.ts";
+ import { UploadUseCase } from "../features/upload/application/use-cases/UploadUseCase.ts";
+ import { FfmpegVideoProcessingAdapter } from "../infrastructure/ffmpeg/FfmpegVideoProcessingAdapter.ts";
++import { FfmpegRunner } from "../infrastructure/ffmpeg/ffmpeg.utils.ts";
+ import { RabbitMQPublisher } from "../infrastructure/messaging/RabbitMQPublisher.ts";
+ import { S3StorageAdapter } from "../infrastructure/storage/S3StorageAdapter.ts";
+ import type { StoragePort } from "../shared/application/ports/outbound/StoragePort.ts";
+ 
+-function buildStorage(config: EnvConfig): StoragePort {
++function buildStorage(config: CommonEnvConfig): StoragePort {
+ 	return new S3StorageAdapter({
+ 		bucket: config.S3_BUCKET,
+ 		region: config.S3_REGION,
+@@ -23,7 +24,7 @@ function buildStorage(config: EnvConfig): StoragePort {
+ 	});
+ }
+ 
+-function buildPublisher(config: EnvConfig): RabbitMQPublisher {
++function buildPublisher(config: CommonEnvConfig): RabbitMQPublisher {
+ 	return new RabbitMQPublisher(config.RABBITMQ_URL, createZMonitor, {
+ 		commandConfirmTimeoutMs: config.COMMAND_PUBLISH_CONFIRM_TIMEOUT_MS,
+ 		eventConfirmTimeoutMs: config.EVENT_PUBLISH_CONFIRM_TIMEOUT_MS,
+@@ -40,7 +41,7 @@ export interface ApiContainer {
+ 	renderCommandPort: RenderCommandPort;
+ }
+ 
+-export function buildApiContainer(config: EnvConfig): ApiContainer {
++export function buildApiContainer(config: ApiEnvConfig): ApiContainer {
+ 	const storage = buildStorage(config);
+ 	const exportEventPublisher = buildPublisher(config);
+ 
+@@ -69,10 +70,11 @@ export interface WorkerContainer {
+ 	renderDLQConsumer: RenderDLQConsumer;
+ }
+ 
+-export function buildWorkerContainer(config: EnvConfig): WorkerContainer {
++export function buildWorkerContainer(config: WorkerEnvConfig): WorkerContainer {
+ 	const storage = buildStorage(config);
+ 	const exportEventPublisher = buildPublisher(config);
+-	const videoProcessing = new FfmpegVideoProcessingAdapter(storage, config);
++	const ffmpegRunner = new FfmpegRunner({ maxConcurrent: config.FFMPEG_MAX_CONCURRENT });
++	const videoProcessing = new FfmpegVideoProcessingAdapter(storage, config, ffmpegRunner);
+ 	const videoRenderUseCase = new VideoRenderUseCase(videoProcessing);
+ 
+ 	const renderRequestedConsumer = new RenderRequestedConsumer({
+diff --git a/apps/server/src/bootstrap/server.ts b/apps/server/src/bootstrap/server.ts
+index 3501fb5..290994b 100644
+--- a/apps/server/src/bootstrap/server.ts
++++ b/apps/server/src/bootstrap/server.ts
+@@ -1,6 +1,6 @@
+ import cors from "@fastify/cors";
+ import { fastifyLoggingPlugin } from "@ztube/observability/fastify";
+-import type { EnvConfig } from "../config/env.ts";
++import type { ApiEnvConfig } from "../config/env.ts";
+ import { previewController } from "../features/preview/adapters/inbound/http/preview.controller.ts";
+ import { renderController } from "../features/render/adapters/inbound/http/render.controller.ts";
+ import { uploadController } from "../features/upload/adapters/inbound/http/upload.controller.ts";
+@@ -10,9 +10,9 @@ import type { ApiContainer } from "./container.ts";
+ export class Server {
+ 	private readonly app: TypedFastify;
+ 	private readonly container: ApiContainer;
+-	private readonly config: EnvConfig;
++	private readonly config: ApiEnvConfig;
+ 
+-	constructor(container: ApiContainer, config: EnvConfig) {
++	constructor(container: ApiContainer, config: ApiEnvConfig) {
+ 		this.app = createFastifyInstance();
+ 		this.container = container;
+ 		this.config = config;
+diff --git a/apps/server/src/bootstrap/system.ts b/apps/server/src/bootstrap/system.ts
+index e4a7320..57695a4 100644
+--- a/apps/server/src/bootstrap/system.ts
++++ b/apps/server/src/bootstrap/system.ts
+@@ -1,14 +1,14 @@
+ import { Logger } from "@ztube/observability";
+-import type { EnvConfig } from "../config/env.ts";
++import type { ApiEnvConfig } from "../config/env.ts";
+ import { type ApiContainer, buildApiContainer } from "./container.ts";
+ import { Server } from "./server.ts";
+ 
+ export class System {
+ 	private readonly container: ApiContainer;
+ 	private readonly server: Server;
+-	private readonly config: EnvConfig;
++	private readonly config: ApiEnvConfig;
+ 
+-	constructor(config: EnvConfig, container?: ApiContainer, server?: Server) {
++	constructor(config: ApiEnvConfig, container?: ApiContainer, server?: Server) {
+ 		this.config = config;
+ 		this.container = container ?? buildApiContainer(config);
+ 		this.server = server ?? new Server(this.container, config);
+diff --git a/apps/server/src/bootstrap/worker.ts b/apps/server/src/bootstrap/worker.ts
+index 66f4702..c277d91 100644
+--- a/apps/server/src/bootstrap/worker.ts
++++ b/apps/server/src/bootstrap/worker.ts
+@@ -1,5 +1,5 @@
+ import { Logger } from "@ztube/observability";
+-import type { EnvConfig } from "../config/env.ts";
++import type { WorkerEnvConfig } from "../config/env.ts";
+ import { RabbitMQConsumer } from "../infrastructure/messaging/RabbitMQConsumer.ts";
+ import {
+ 	DLX_EXCHANGE,
+@@ -19,13 +19,13 @@ const RENDER_QUEUE_MAX_LENGTH = 10_000;
+ const RENDER_DELIVERY_LIMIT = 5;
+ 
+ export interface WorkerOptions {
+-	config: EnvConfig;
++	config: WorkerEnvConfig;
+ 	container?: WorkerContainer;
+ 	probe?: WorkerProbeServer;
+ }
+ 
+ export class Worker {
+-	private readonly config: EnvConfig;
++	private readonly config: WorkerEnvConfig;
+ 	private readonly container: WorkerContainer;
+ 	private readonly renderConsumer: RabbitMQConsumer;
+ 	private readonly dlqConsumer: RabbitMQConsumer;
+diff --git a/apps/server/src/config/env.ts b/apps/server/src/config/env.ts
+index 981a3c9..5b1d2c8 100644
+--- a/apps/server/src/config/env.ts
++++ b/apps/server/src/config/env.ts
+@@ -10,75 +10,91 @@ function boolEnv(defaultValue: boolean) {
+ 	}, z.boolean());
+ }
+ 
+-const envSchema = z.object({
++// Fields used by both the API and the Worker processes.
++const commonEnvSchema = z.object({
+ 	// Observability (OTel disabled when OTEL_ENDPOINT absent)
+ 	SERVICE_NAME: z.string().default("video-editor-server"),
+ 	SERVICE_VERSION: z.string().default("1.0.0"),
+ 	LOG_LEVEL: z.string().default("info"),
+ 	OTEL_ENDPOINT: z.string().optional(),
+-	PYROSCOPE_SERVER_ADDRESS: z.string().optional(),
+-	// Server
+-	PORT: z.coerce.number().default(4001),
+-	HOST: z.string().default("127.0.0.1"),
++	// FFmpeg
+ 	MIN_TRANSCODE_SEGMENT_SECONDS: z.coerce.number().default(0.35),
+ 	FFMPEG_PRESET: z.string().default("veryfast"),
+ 	FFMPEG_CRF: z.string().default("20"),
+ 	FFMPEG_AUDIO_BITRATE: z.string().default("192k"),
+ 	FFMPEG_MAX_CONCURRENT: z.coerce.number().int().min(1).default(2),
+-	// Preview source (MPD → HLS).
+-	// CORE_BASE_URL includes the "/private" prefix because real Core groups auth-required
+-	// endpoints there — the preview adapter appends `/channels/:id/play` to it.
+-	// Dev: http://localhost:8002/private.
+-	CORE_BASE_URL: z.url(),
+-	MOCK_VOD_BASE_URL: z.url().optional(),
+-	SERVER_BASE_URL: z.string(),
+-	MAX_PREVIEW_DURATION_MS: z.coerce.number().default(3600000),
+-	PREVIEW_JOB_TTL_SECONDS: z.coerce.number().default(86400),
+-	S3_PREVIEW_PREFIX: z.string().default("preview"),
+-	// HMAC secret for segment-proxy URL signing. Prevents SSRF via /editor/segment.
+-	PREVIEW_SIGNING_SECRET: z.string().min(32),
+-	// MPD
++	// MPD / source-processor transcoding — used by both API (preview) and Worker (render)
+ 	ENABLE_MPD_RESTRICTIONS: boolEnv(false),
+ 	TRANSCODE_TIMEOUT_MS: z.coerce.number().default(7200000),
+ 	MAX_TEMP_FILE_SIZE_MB: z.coerce.number().default(5000),
+ 	MPD_TRANSCODE_CRF_MULTI: z.string().default("10"),
+ 	MPD_TRANSCODE_CRF_SINGLE: z.string().default("18"),
+ 	MPD_TRANSCODE_PRESET: z.string().default("medium"),
+-	// S3
++	// S3 (connection + shared prefix)
+ 	S3_BUCKET: z.string(),
+ 	S3_REGION: z.string().default("us-east-1"),
+ 	S3_ENDPOINT: z.string(),
+ 	S3_FORCE_PATH_STYLE: boolEnv(true),
+ 	S3_ACCESS_KEY_ID: z.string(),
+ 	S3_SECRET_ACCESS_KEY: z.string(),
+-	S3_UPLOAD_PREFIX: z.string().default("uploads"),
+ 	S3_OUTPUT_PREFIX: z.string().default("output"),
+-	S3_AUTO_CREATE_BUCKET: boolEnv(true),
+ 	RENDER_URL_EXPIRY_SECONDS: z.coerce.number().default(86400),
+-	// Max accepted upload size in bytes. Default mirrors the prior multipart cap
+-	// (500 MB). Enforced server-side AND bound into the presigned PUT via the
+-	// signed Content-Length so S3 rejects mismatched uploads.
+-	UPLOAD_MAX_SIZE_BYTES: z.coerce.number().int().positive().default(524_288_000),
+-	// Messaging
++	// Messaging — both processes connect, assert topology, and use the publisher factory
+ 	RABBITMQ_URL: z.string(),
+ 	COMMAND_PUBLISH_CONFIRM_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+ 	EVENT_PUBLISH_CONFIRM_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+ 	AMQP_INITIAL_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
+ 	RENDER_REQUEST_TTL_MS: z.coerce.number().int().positive().optional(),
+-	// Worker
++});
++
++const apiEnvSchema = commonEnvSchema.extend({
++	// Server bind
++	PORT: z.coerce.number().default(4001),
++	HOST: z.string().default("127.0.0.1"),
++	// Preview source (MPD → HLS).
++	// CORE_BASE_URL includes the "/private" prefix because real Core groups auth-required
++	// endpoints there — the preview adapter appends `/channels/:id/play` to it.
++	// Dev: http://localhost:8002/private.
++	CORE_BASE_URL: z.url(),
++	MOCK_VOD_BASE_URL: z.url().optional(),
++	SERVER_BASE_URL: z.string(),
++	MAX_PREVIEW_DURATION_MS: z.coerce.number().default(3600000),
++	PREVIEW_JOB_TTL_SECONDS: z.coerce.number().default(86400),
++	S3_PREVIEW_PREFIX: z.string().default("preview"),
++	// HMAC secret for segment-proxy URL signing. Prevents SSRF via /editor/segment.
++	PREVIEW_SIGNING_SECRET: z.string().min(32),
++	// Upload — API issues presigned PUTs and enforces the cap via signed Content-Length
++	S3_UPLOAD_PREFIX: z.string().default("uploads"),
++	UPLOAD_MAX_SIZE_BYTES: z.coerce.number().int().positive().default(524_288_000),
++	// Bootstrap-only
++	S3_AUTO_CREATE_BUCKET: boolEnv(true),
++});
++
++const workerEnvSchema = commonEnvSchema.extend({
+ 	WORKER_CONCURRENCY: z.coerce.number().int().min(1).default(1),
+ 	WORKER_PROBE_PORT: z.coerce.number().int().positive().default(8081),
+ });
+ 
+-export type EnvConfig = z.infer<typeof envSchema>;
++export type CommonEnvConfig = z.infer<typeof commonEnvSchema>;
++export type ApiEnvConfig = z.infer<typeof apiEnvSchema>;
++export type WorkerEnvConfig = z.infer<typeof workerEnvSchema>;
++
++function formatIssues(error: z.ZodError): string {
++	return error.issues.map((issue) => `  ${issue.path.join(".")}: ${issue.message}`).join("\n");
++}
++
++export function parseApiEnv(): ApiEnvConfig {
++	const result = apiEnvSchema.safeParse(process.env);
++	if (!result.success) {
++		throw new Error(`Invalid environment configuration (API):\n${formatIssues(result.error)}`);
++	}
++	return result.data;
++}
+ 
+-export function parseEnv(): EnvConfig {
+-	const result = envSchema.safeParse(process.env);
++export function parseWorkerEnv(): WorkerEnvConfig {
++	const result = workerEnvSchema.safeParse(process.env);
+ 	if (!result.success) {
+-		const errors = result.error.issues
+-			.map((issue) => `  ${issue.path.join(".")}: ${issue.message}`)
+-			.join("\n");
+-		throw new Error(`Invalid environment configuration:\n${errors}`);
++		throw new Error(`Invalid environment configuration (Worker):\n${formatIssues(result.error)}`);
+ 	}
+ 	return result.data;
+ }
+diff --git a/apps/server/src/features/preview/adapters/inbound/http/__tests__/preview.controller.e2e.test.ts b/apps/server/src/features/preview/adapters/inbound/http/__tests__/preview.controller.e2e.test.ts
+index 34f46dd..be77f96 100644
+--- a/apps/server/src/features/preview/adapters/inbound/http/__tests__/preview.controller.e2e.test.ts
++++ b/apps/server/src/features/preview/adapters/inbound/http/__tests__/preview.controller.e2e.test.ts
+@@ -2,7 +2,7 @@ import { buildCoreMock, type CoreMockHandle } from "@video-editor/core-mock";
+ import { buildMockVod, type MockVodHandle } from "@video-editor/mock-vod";
+ import Fastify, { type FastifyInstance } from "fastify";
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
+-import type { EnvConfig } from "../../../../../../config/env.ts";
++import type { ApiEnvConfig } from "../../../../../../config/env.ts";
+ import { InMemoryStorageAdapter } from "../../../../../../infrastructure/storage/__tests__/InMemoryStorageAdapter.ts";
+ import { previewController } from "../preview.controller.ts";
+ 
+@@ -36,7 +36,7 @@ describe("preview.controller E2E (core-mock + mock-vod + server)", () => {
+ 			PREVIEW_JOB_TTL_SECONDS: 86400,
+ 			S3_PREVIEW_PREFIX: "preview",
+ 			PREVIEW_SIGNING_SECRET: "test-secret-for-url-signing-32characters",
+-		} as unknown as EnvConfig;
++		} as unknown as ApiEnvConfig;
+ 		await server.register(previewController, { storage, config });
+ 	});
+ 
+diff --git a/apps/server/src/features/preview/adapters/inbound/http/__tests__/preview.controller.test.ts b/apps/server/src/features/preview/adapters/inbound/http/__tests__/preview.controller.test.ts
+index c0e0aed..5fde34f 100644
+--- a/apps/server/src/features/preview/adapters/inbound/http/__tests__/preview.controller.test.ts
++++ b/apps/server/src/features/preview/adapters/inbound/http/__tests__/preview.controller.test.ts
+@@ -1,10 +1,10 @@
+ import Fastify from "fastify";
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+-import type { EnvConfig } from "../../../../../../config/env.ts";
++import type { ApiEnvConfig } from "../../../../../../config/env.ts";
+ import { InMemoryStorageAdapter } from "../../../../../../infrastructure/storage/__tests__/InMemoryStorageAdapter.ts";
+ import { previewController } from "../preview.controller.ts";
+ 
+-function makeConfig(): EnvConfig {
++function makeConfig(): ApiEnvConfig {
+ 	return {
+ 		CORE_BASE_URL: "http://core.local/private",
+ 		SERVER_BASE_URL: "http://server.local",
+@@ -12,7 +12,7 @@ function makeConfig(): EnvConfig {
+ 		PREVIEW_JOB_TTL_SECONDS: 86400,
+ 		S3_PREVIEW_PREFIX: "preview",
+ 		PREVIEW_SIGNING_SECRET: "test-secret-for-url-signing-32characters",
+-	} as unknown as EnvConfig;
++	} as unknown as ApiEnvConfig;
+ }
+ 
+ describe("previewController POST /editor/preview-source", () => {
+diff --git a/apps/server/src/features/preview/adapters/inbound/http/preview.controller.ts b/apps/server/src/features/preview/adapters/inbound/http/preview.controller.ts
+index 0bc82e0..3114d08 100644
+--- a/apps/server/src/features/preview/adapters/inbound/http/preview.controller.ts
++++ b/apps/server/src/features/preview/adapters/inbound/http/preview.controller.ts
+@@ -1,5 +1,5 @@
+ import type { FastifyPluginAsync } from "fastify";
+-import type { EnvConfig } from "../../../../../config/env.ts";
++import type { ApiEnvConfig } from "../../../../../config/env.ts";
+ import type { StoragePort } from "../../../../../shared/application/ports/outbound/StoragePort.ts";
+ import { HttpStatus } from "../../../../../shared/utils/http-status.ts";
+ import { verifyUrlSignature } from "../../../application/services/url-signing.ts";
+@@ -19,7 +19,7 @@ interface PreviewSourceBody {
+ 
+ interface PreviewControllerOptions {
+ 	storage: StoragePort;
+-	config: EnvConfig;
++	config: ApiEnvConfig;
+ }
+ 
+ export const previewController: FastifyPluginAsync<PreviewControllerOptions> = async (
+diff --git a/apps/server/src/features/preview/application/use-cases/GeneratePreviewUseCase.ts b/apps/server/src/features/preview/application/use-cases/GeneratePreviewUseCase.ts
+index 54e3102..2ce9e52 100644
+--- a/apps/server/src/features/preview/application/use-cases/GeneratePreviewUseCase.ts
++++ b/apps/server/src/features/preview/application/use-cases/GeneratePreviewUseCase.ts
+@@ -1,4 +1,4 @@
+-import type { EnvConfig } from "../../../../config/env.ts";
++import type { ApiEnvConfig } from "../../../../config/env.ts";
+ import type { StoragePort } from "../../../../shared/application/ports/outbound/StoragePort.ts";
+ import type { PreviewSourcePort } from "../ports/outbound/PreviewSourcePort.ts";
+ import { generateHlsPlaylist } from "../services/mpd-to-hls.service.ts";
+@@ -53,9 +53,9 @@ function rewritePlaylistToProxy(
+ 
+ export class GeneratePreviewUseCase {
+ 	private readonly storage: StoragePort;
+-	private readonly config: EnvConfig;
++	private readonly config: ApiEnvConfig;
+ 
+-	constructor(storage: StoragePort, config: EnvConfig) {
++	constructor(storage: StoragePort, config: ApiEnvConfig) {
+ 		this.storage = storage;
+ 		this.config = config;
+ 	}
+diff --git a/apps/server/src/features/preview/application/use-cases/__tests__/GeneratePreviewUseCase.test.ts b/apps/server/src/features/preview/application/use-cases/__tests__/GeneratePreviewUseCase.test.ts
+index 020111a..e6832b4 100644
+--- a/apps/server/src/features/preview/application/use-cases/__tests__/GeneratePreviewUseCase.test.ts
++++ b/apps/server/src/features/preview/application/use-cases/__tests__/GeneratePreviewUseCase.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it } from "vitest";
+-import type { EnvConfig } from "../../../../../config/env.ts";
++import type { ApiEnvConfig } from "../../../../../config/env.ts";
+ import { InMemoryStorageAdapter } from "../../../../../infrastructure/storage/__tests__/InMemoryStorageAdapter.ts";
+ import type {
+ 	PreviewPlayResult,
+@@ -24,14 +24,14 @@ const FIXTURE_MPD = `<?xml version="1.0" encoding="utf-8"?>
+ 
+ const SEG_START = 1_778_412_270_000;
+ 
+-function makeConfig(): EnvConfig {
++function makeConfig(): ApiEnvConfig {
+ 	return {
+ 		SERVER_BASE_URL: "http://server.local",
+ 		MAX_PREVIEW_DURATION_MS: 3_600_000,
+ 		PREVIEW_JOB_TTL_SECONDS: 86400,
+ 		S3_PREVIEW_PREFIX: "preview",
+ 		PREVIEW_SIGNING_SECRET: "test-secret-for-url-signing-32characters",
+-	} as unknown as EnvConfig;
++	} as unknown as ApiEnvConfig;
+ }
+ 
+ function makePreviewSource(): PreviewSourcePort & {
+diff --git a/apps/server/src/index.ts b/apps/server/src/index.ts
+index 5fd21e6..d2409c3 100644
+--- a/apps/server/src/index.ts
++++ b/apps/server/src/index.ts
+@@ -1,7 +1,7 @@
+ import { initTelemetry, Logger } from "@ztube/observability";
+-import { parseEnv } from "./config/env.ts";
++import { parseApiEnv } from "./config/env.ts";
+ 
+-const config = parseEnv();
++const config = parseApiEnv();
+ 
+ if (config.OTEL_ENDPOINT) {
+ 	initTelemetry({
+diff --git a/apps/server/src/infrastructure/ffmpeg/FfmpegVideoProcessingAdapter.ts b/apps/server/src/infrastructure/ffmpeg/FfmpegVideoProcessingAdapter.ts
+index b28958a..6471c1a 100644
+--- a/apps/server/src/infrastructure/ffmpeg/FfmpegVideoProcessingAdapter.ts
++++ b/apps/server/src/infrastructure/ffmpeg/FfmpegVideoProcessingAdapter.ts
+@@ -1,6 +1,6 @@
+ import { promises as fsp } from "node:fs";
+ import { Logger } from "@ztube/observability";
+-import type { EnvConfig } from "../../config/env.ts";
++import type { CommonEnvConfig } from "../../config/env.ts";
+ import type { StoragePort } from "../../shared/application/ports/outbound/StoragePort.ts";
+ import type {
+ 	RenderJob,
+@@ -9,6 +9,7 @@ import type {
+ } from "../../shared/application/ports/outbound/VideoRenderPort.ts";
+ import { createTempDir } from "../../shared/utils/file.utils.ts";
+ import { extractSegments, finalRenderToS3 } from "./FfmpegVideoProcessor.ts";
++import type { FfmpegRunner } from "./ffmpeg.utils.ts";
+ import { prepareOverlays } from "./overlays/overlay.service.ts";
+ import { prepareWatermarkLogo } from "./overlays/watermark.service.ts";
+ import { prepareAudioSources } from "./source-processors/audio-process.ts";
+@@ -16,11 +17,13 @@ import { processSources } from "./source-processors/process-sources.ts";
+ 
+ export class FfmpegVideoProcessingAdapter implements VideoRenderPort {
+ 	private readonly storage: StoragePort;
+-	private readonly config: EnvConfig;
++	private readonly config: CommonEnvConfig;
++	private readonly runner: FfmpegRunner;
+ 
+-	constructor(storage: StoragePort, config: EnvConfig) {
++	constructor(storage: StoragePort, config: CommonEnvConfig, runner: FfmpegRunner) {
+ 		this.storage = storage;
+ 		this.config = config;
++		this.runner = runner;
+ 	}
+ 
+ 	async render(job: RenderJob): Promise<RenderResult> {
+@@ -34,6 +37,7 @@ export class FfmpegVideoProcessingAdapter implements VideoRenderPort {
+ 				tempDir,
+ 				this.storage,
+ 				this.config,
++				this.runner,
+ 				job.signal,
+ 			);
+ 			Logger.logInfo("[ffmpeg] sources processed", { durationMs: Date.now() - stageStart });
+@@ -45,6 +49,7 @@ export class FfmpegVideoProcessingAdapter implements VideoRenderPort {
+ 				job.keepSegments,
+ 				tempDir,
+ 				this.config,
++				this.runner,
+ 				job.signal,
+ 			);
+ 			Logger.logInfo("[ffmpeg] segments extracted", {
+@@ -56,13 +61,21 @@ export class FfmpegVideoProcessingAdapter implements VideoRenderPort {
+ 			stageStart = Date.now();
+ 			const [{ overlayInputs, hasOverlays }, { audioPaths, hasAudio }, wmLogoPath] =
+ 				await Promise.all([
+-					prepareOverlays(job.overlays, tempDir, this.storage, this.config, job.signal),
++					prepareOverlays(
++						job.overlays,
++						tempDir,
++						this.storage,
++						this.config,
++						this.runner,
++						job.signal,
++					),
+ 					prepareAudioSources(
+ 						job.audioSources,
+ 						tempDir,
+ 						job.totalDuration,
+ 						this.storage,
+ 						this.config,
++						this.runner,
+ 						job.signal,
+ 					),
+ 					prepareWatermarkLogo(),
+@@ -92,6 +105,7 @@ export class FfmpegVideoProcessingAdapter implements VideoRenderPort {
+ 				job.s3Key,
+ 				this.storage,
+ 				this.config,
++				this.runner,
+ 				this.config.RENDER_URL_EXPIRY_SECONDS,
+ 				job.onProgress ? (p: number) => void job.onProgress?.(30 + Math.round(p * 0.7)) : undefined,
+ 				job.cropRegion,
+diff --git a/apps/server/src/infrastructure/ffmpeg/FfmpegVideoProcessor.ts b/apps/server/src/infrastructure/ffmpeg/FfmpegVideoProcessor.ts
+index 589f4bf..7beefb9 100644
+--- a/apps/server/src/infrastructure/ffmpeg/FfmpegVideoProcessor.ts
++++ b/apps/server/src/infrastructure/ffmpeg/FfmpegVideoProcessor.ts
+@@ -1,71 +1,24 @@
+-import { spawn } from "node:child_process";
+ import fs, { existsSync, promises as fsp } from "node:fs";
+ import path from "node:path";
+-import { PassThrough } from "node:stream";
+ import type { Overlay, VideoSource } from "@video-editor/contract/internal/edit-video";
+ import type { TimeRange } from "@video-editor/contract/internal/shared";
+ import sharp from "sharp";
+-import type { EnvConfig } from "../../config/env.ts";
++import type { CommonEnvConfig } from "../../config/env.ts";
+ import type { StoragePort } from "../../shared/application/ports/outbound/StoragePort.ts";
+ import { normalizeFfmpegDuration, normalizeFfmpegTime } from "../../shared/utils/time.utils.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "./ffmpeg.consts.ts";
+-import { ffmpegSemaphore, getFfmpegPath, hasAudioStream, runFfmpeg } from "./ffmpeg.utils.ts";
++import { type FfmpegRunner, hasAudioStream } from "./ffmpeg.utils.ts";
+ import { FfmpegCommandBuilder } from "./ffmpeg-command.builder.ts";
+ import type { PreparedOverlayInput } from "./overlays/overlay.service.ts";
+ 
+ const FFMPEG_PREFLIGHT_CONCAT = process.env.FFMPEG_PREFLIGHT_CONCAT !== "0";
+ 
+-const parseProgressFromLine = (
+-	line: string,
+-	totalDuration: number,
+-	onProgress: (percent: number) => void,
+-): void => {
+-	if (totalDuration <= 0) return;
+-
+-	const match = /time=(\d{2}:\d{2}:\d{2}\.\d+)/.exec(line);
+-	if (!match?.[1]) return;
+-
+-	const [hoursText, minsText, secsText] = match[1].split(":");
+-	if (hoursText === undefined || minsText === undefined || secsText === undefined) {
+-		return;
+-	}
+-
+-	const hours = Number.parseFloat(hoursText);
+-	const mins = Number.parseFloat(minsText);
+-	const secs = Number.parseFloat(secsText);
+-	const currentSeconds = hours * 3600 + mins * 60 + secs;
+-	const percent = (currentSeconds / totalDuration) * 100;
+-	onProgress(Math.min(99, Math.max(0, Math.round(percent))));
+-};
+-
+-const makeStderrHandler = (
+-	totalDuration: number,
+-	onProgress?: (percent: number) => void,
+-): { onData: (chunk: Buffer) => void; getBuffer: () => string } => {
+-	let stderrBuffer = "";
+-	let lineBuffer = "";
+-	return {
+-		onData: (chunk: Buffer): void => {
+-			const text = chunk.toString();
+-			stderrBuffer = `${stderrBuffer + text}\n`.slice(-32768);
+-			if (onProgress) {
+-				lineBuffer += text;
+-				const lines = lineBuffer.split("\n");
+-				lineBuffer = lines.pop() ?? "";
+-				for (const line of lines) {
+-					parseProgressFromLine(line, totalDuration, onProgress);
+-				}
+-			}
+-		},
+-		getBuffer: () => stderrBuffer,
+-	};
+-};
+-
+ export async function extractSegments(
+ 	sourcePath: string,
+ 	keepSegments: TimeRange[],
+ 	tempDir: string,
+-	config: EnvConfig,
++	config: CommonEnvConfig,
++	runner: FfmpegRunner,
+ 	signal?: AbortSignal,
+ ): Promise<string[]> {
+ 	return Promise.all(
+@@ -98,7 +51,7 @@ export async function extractSegments(
+ 				segmentPath,
+ 			];
+ 
+-			await runFfmpeg(args, 0, signal);
++			await runner.run(args, 0, signal);
+ 
+ 			return segmentPath;
+ 		}),
+@@ -114,7 +67,7 @@ function validateConcatSegmentsExist(segmentPaths: string[]): void {
+ 	}
+ }
+ 
+-async function preflightConcat(concatFilePath: string): Promise<void> {
++async function preflightConcat(concatFilePath: string, runner: FfmpegRunner): Promise<void> {
+ 	const args = [
+ 		...FFMPEG_COMMAND.CONCAT_SAFE_0,
+ 		FFMPEG_FLAG.INPUT,
+@@ -126,10 +79,14 @@ async function preflightConcat(concatFilePath: string): Promise<void> {
+ 		"null",
+ 		"-",
+ 	];
+-	await runFfmpeg(args);
++	await runner.run(args);
+ }
+ 
+-const createConcatFile = async (segmentPaths: string[], tempDir: string): Promise<string> => {
++const createConcatFile = async (
++	segmentPaths: string[],
++	tempDir: string,
++	runner: FfmpegRunner,
++): Promise<string> => {
+ 	validateConcatSegmentsExist(segmentPaths);
+ 	const concatFile = path.join(tempDir, "concat.txt");
+ 	const content = segmentPaths
+@@ -139,7 +96,7 @@ const createConcatFile = async (segmentPaths: string[], tempDir: string): Promis
+ 	await fsp.writeFile(concatFile, content, "utf8");
+ 	if (FFMPEG_PREFLIGHT_CONCAT) {
+ 		try {
+-			await preflightConcat(concatFile);
++			await preflightConcat(concatFile, runner);
+ 		} catch (err) {
+ 			const msg = err instanceof Error ? err.message : String(err);
+ 			throw new Error(`Concat preflight failed: ${msg}. Set FFMPEG_PREFLIGHT_CONCAT=0 to skip.`);
+@@ -180,153 +137,11 @@ const clampFrameTimeMs = (
+ 	return Math.min(maxFrameTimeMs, Math.max(0, Math.round(frameTimeMs)));
+ };
+ 
+-const runCommandToStream = async (
+-	args: string[],
+-	totalDuration: number,
+-	storage: StoragePort,
+-	s3Key: string,
+-	contentType: string,
+-	onProgress?: (percent: number) => void,
+-	signal?: AbortSignal,
+-): Promise<void> => {
+-	if (signal?.aborted) throw new Error("Render cancelled");
+-	await ffmpegSemaphore.acquire();
+-	if (signal?.aborted) {
+-		ffmpegSemaphore.release();
+-		throw new Error("Render cancelled");
+-	}
+-	try {
+-		const pass = new PassThrough();
+-		const ffmpegPath = getFfmpegPath();
+-		// Append pipe:1 so FFmpeg writes encoded output to its stdout
+-		const fullArgs = [...args, FFMPEG_FLAG.PIPE_OUTPUT];
+-
+-		console.log("[ffmpeg]", ffmpegPath, fullArgs.join(" "));
+-		const proc = spawn(ffmpegPath, fullArgs);
+-
+-		const ffmpegPromise = new Promise<void>((resolve, reject) => {
+-			const { onData, getBuffer } = makeStderrHandler(totalDuration, onProgress);
+-
+-			proc.stderr.on("data", onData);
+-
+-			proc.stdout.pipe(pass, { end: false });
+-
+-			const isCancelled = { value: false };
+-
+-			const onAbort = (): void => {
+-				isCancelled.value = true;
+-				proc.kill("SIGKILL");
+-				pass.destroy(new Error("Render cancelled"));
+-				reject(new Error("Render cancelled"));
+-			};
+-			signal?.addEventListener("abort", onAbort, { once: true });
+-
+-			proc.on("close", (code) => {
+-				signal?.removeEventListener("abort", onAbort);
+-				if (isCancelled.value) return;
+-				if (code === 0) {
+-					pass.end();
+-					resolve();
+-				} else {
+-					const buf = getBuffer();
+-					const err = new Error(
+-						buf.trim().length > 0
+-							? `FFmpeg exited with code ${code}\n\nFFmpeg stderr (tail):\n${buf}`
+-							: `FFmpeg exited with code ${code}`,
+-					);
+-					pass.destroy(err);
+-					reject(err);
+-				}
+-			});
+-
+-			proc.on("error", (err) => {
+-				signal?.removeEventListener("abort", onAbort);
+-				if (!isCancelled.value) {
+-					pass.destroy(err);
+-					reject(err);
+-				}
+-			});
+-		});
+-
+-		try {
+-			await Promise.all([ffmpegPromise, storage.uploadStream(pass, s3Key, contentType)]);
+-		} catch (err) {
+-			try {
+-				proc.kill("SIGKILL");
+-			} catch {}
+-			pass.destroy();
+-			throw err;
+-		}
+-	} finally {
+-		ffmpegSemaphore.release();
+-	}
+-};
+-
+-const runCommandToFile = async (
+-	args: string[],
+-	outputPath: string,
+-	totalDuration: number,
+-	onProgress?: (percent: number) => void,
+-	signal?: AbortSignal,
+-): Promise<void> => {
+-	if (signal?.aborted) throw new Error("Render cancelled");
+-	await ffmpegSemaphore.acquire();
+-	if (signal?.aborted) {
+-		ffmpegSemaphore.release();
+-		throw new Error("Render cancelled");
+-	}
+-	try {
+-		await new Promise<void>((resolve, reject) => {
+-			const ffmpegPath = getFfmpegPath();
+-			const fullArgs = [...args, outputPath];
+-
+-			console.log("[ffmpeg]", ffmpegPath, fullArgs.join(" "));
+-			const proc = spawn(ffmpegPath, fullArgs);
+-
+-			const { onData, getBuffer } = makeStderrHandler(totalDuration, onProgress);
+-
+-			proc.stderr.on("data", onData);
+-
+-			const isCancelled = { value: false };
+-
+-			const onAbort = (): void => {
+-				isCancelled.value = true;
+-				proc.kill("SIGKILL");
+-				reject(new Error("Render cancelled"));
+-			};
+-			signal?.addEventListener("abort", onAbort, { once: true });
+-
+-			proc.on("close", (code) => {
+-				signal?.removeEventListener("abort", onAbort);
+-				if (isCancelled.value) return;
+-				if (code === 0) {
+-					resolve();
+-				} else {
+-					const buf = getBuffer();
+-					reject(
+-						new Error(
+-							buf.trim().length > 0
+-								? `FFmpeg exited with code ${code}\n\nFFmpeg stderr (tail):\n${buf}`
+-								: `FFmpeg exited with code ${code}`,
+-						),
+-					);
+-				}
+-			});
+-
+-			proc.on("error", (err) => {
+-				signal?.removeEventListener("abort", onAbort);
+-				if (!isCancelled.value) reject(err);
+-			});
+-		});
+-	} finally {
+-		ffmpegSemaphore.release();
+-	}
+-};
+-
+ const extractFrameToImage = async (
+ 	inputPath: string,
+ 	outputPath: string,
+ 	frameTimeMs: number,
++	runner: FfmpegRunner,
+ ): Promise<void> => {
+ 	const seekTimeSeconds = String(normalizeFfmpegTime(frameTimeMs / 1000));
+ 
+@@ -343,13 +158,14 @@ const extractFrameToImage = async (
+ 		"image2",
+ 	];
+ 
+-	await runFfmpeg([...args, outputPath]);
++	await runner.run([...args, outputPath]);
+ };
+ 
+ const packToDash = async (
+ 	inputMp4: string,
+ 	outputDir: string,
+ 	videoHasAudio: boolean,
++	runner: FfmpegRunner,
+ 	segmentDurationS = 4,
+ ): Promise<void> => {
+ 	const manifestPath = path.join(outputDir, "manifest.mpd");
+@@ -375,7 +191,7 @@ const packToDash = async (
+ 		manifestPath,
+ 	];
+ 
+-	await runFfmpeg(args);
++	await runner.run(args);
+ };
+ 
+ const uploadDashToS3 = async (
+@@ -410,14 +226,15 @@ export const finalRenderToS3 = async (
+ 	frameTimeMs: number | undefined,
+ 	s3Key: string,
+ 	storage: StoragePort,
+-	config: EnvConfig,
++	config: CommonEnvConfig,
++	runner: FfmpegRunner,
+ 	expiresInSeconds = 86400,
+ 	onProgress?: (percent: number) => void,
+ 	cropRegion?: { x: number; y: number; width: number; height: number },
+ 	signal?: AbortSignal,
+ 	wmLogoPath?: string,
+ ): Promise<{ s3Key: string; url: string }> => {
+-	const concatFile = await createConcatFile(segmentPaths, tempDir);
++	const concatFile = await createConcatFile(segmentPaths, tempDir, runner);
+ 
+ 	const videoHasAudio =
+ 		segmentPaths.length > 0 ? await hasAudioStream(segmentPaths[0]).catch(() => false) : false;
+@@ -465,8 +282,8 @@ export const finalRenderToS3 = async (
+ 		const renderedWebpPath = path.join(tempDir, `rendered-${ts}.webp`);
+ 		const safeFrameTimeMs = clampFrameTimeMs(frameTimeMs, totalDuration);
+ 
+-		await runCommandToFile(args, renderedVideoPath, totalDuration, onProgress, signal);
+-		await extractFrameToImage(renderedVideoPath, renderedFramePath, safeFrameTimeMs);
++		await runner.runToFile(args, renderedVideoPath, totalDuration, onProgress, signal);
++		await extractFrameToImage(renderedVideoPath, renderedFramePath, safeFrameTimeMs, runner);
+ 		await sharp(renderedFramePath).webp().toFile(renderedWebpPath);
+ 		await storage.uploadStream(
+ 			fs.createReadStream(renderedWebpPath),
+@@ -479,17 +296,17 @@ export const finalRenderToS3 = async (
+ 		const dashOutputDir = path.join(tempDir, `dash-${ts}`);
+ 		await fsp.mkdir(dashOutputDir, { recursive: true });
+ 
+-		await runCommandToFile(args, renderedVideoPath, totalDuration, onProgress, signal);
++		await runner.runToFile(args, renderedVideoPath, totalDuration, onProgress, signal);
+ 
+ 		const renderedHasAudio = await hasAudioStream(renderedVideoPath).catch(() => false);
+-		await packToDash(renderedVideoPath, dashOutputDir, renderedHasAudio);
++		await packToDash(renderedVideoPath, dashOutputDir, renderedHasAudio, runner);
+ 		await uploadDashToS3(dashOutputDir, s3Key, storage);
+ 
+ 		const manifestKey = `${s3Key}/manifest.mpd`;
+ 		const url = await storage.getPresignedUrl(manifestKey, expiresInSeconds);
+ 		return { s3Key: manifestKey, url };
+ 	} else {
+-		await runCommandToStream(
++		await runner.runToStream(
+ 			args,
+ 			totalDuration,
+ 			storage,
+diff --git a/apps/server/src/infrastructure/ffmpeg/__tests__/ffmpeg-command.builder.test.ts b/apps/server/src/infrastructure/ffmpeg/__tests__/ffmpeg-command.builder.test.ts
+index 6c08293..e3087a7 100644
+--- a/apps/server/src/infrastructure/ffmpeg/__tests__/ffmpeg-command.builder.test.ts
++++ b/apps/server/src/infrastructure/ffmpeg/__tests__/ffmpeg-command.builder.test.ts
+@@ -1,12 +1,12 @@
+ import { describe, expect, it } from "vitest";
+-import type { EnvConfig } from "../../../config/env.ts";
++import type { CommonEnvConfig } from "../../../config/env.ts";
+ import { FfmpegCommandBuilder } from "../ffmpeg-command.builder.ts";
+ 
+ const config = {
+ 	FFMPEG_PRESET: "veryfast",
+ 	FFMPEG_CRF: "20",
+ 	FFMPEG_AUDIO_BITRATE: "192k",
+-} as unknown as EnvConfig;
++} as unknown as CommonEnvConfig;
+ 
+ const buildMp4Args = (needsProcessing: boolean, withWatermark = false): string[] => {
+ 	const builder = new FfmpegCommandBuilder(config);
+diff --git a/apps/server/src/infrastructure/ffmpeg/ffmpeg-command.builder.ts b/apps/server/src/infrastructure/ffmpeg/ffmpeg-command.builder.ts
+index a2c73a1..1542bf1 100644
+--- a/apps/server/src/infrastructure/ffmpeg/ffmpeg-command.builder.ts
++++ b/apps/server/src/infrastructure/ffmpeg/ffmpeg-command.builder.ts
+@@ -1,5 +1,5 @@
+ import type { Overlay, VideoSource } from "@video-editor/contract/internal/edit-video";
+-import type { EnvConfig } from "../../config/env.ts";
++import type { CommonEnvConfig } from "../../config/env.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "./ffmpeg.consts.ts";
+ import { buildOverlayFilters, type PreparedOverlayInput } from "./overlays/overlay.service.ts";
+ import { buildWatermarkFilterParts } from "./overlays/watermark.service.ts";
+@@ -12,10 +12,10 @@ export class FfmpegCommandBuilder {
+ 	private readonly inputBlocks: string[][] = [];
+ 	private filterParts: string[] = [];
+ 	private readonly outputArgs: string[] = [];
+-	private readonly config: EnvConfig;
++	private readonly config: CommonEnvConfig;
+ 	private wmInputIndex: number | null = null;
+ 
+-	constructor(config: EnvConfig) {
++	constructor(config: CommonEnvConfig) {
+ 		this.config = config;
+ 	}
+ 
+diff --git a/apps/server/src/infrastructure/ffmpeg/ffmpeg.utils.ts b/apps/server/src/infrastructure/ffmpeg/ffmpeg.utils.ts
+index f91e786..678ded2 100644
+--- a/apps/server/src/infrastructure/ffmpeg/ffmpeg.utils.ts
++++ b/apps/server/src/infrastructure/ffmpeg/ffmpeg.utils.ts
+@@ -1,8 +1,11 @@
+ import { spawn } from "node:child_process";
++import { PassThrough } from "node:stream";
+ import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+ import type { VideoMetadata } from "@video-editor/contract/internal/shared";
+ import { Logger } from "@ztube/observability";
+ import ffprobeStatic from "ffprobe-static";
++import type { StoragePort } from "../../shared/application/ports/outbound/StoragePort.ts";
++import { FFMPEG_FLAG } from "./ffmpeg.consts.ts";
+ 
+ const FFPROBE_QUIET = "-v";
+ const FFPROBE_QUIET_LEVEL = "quiet";
+@@ -39,81 +42,270 @@ class Semaphore {
+ 	}
+ }
+ 
+-const FFMPEG_MAX_CONCURRENT = Number(process.env.FFMPEG_MAX_CONCURRENT) || 2;
+-export const ffmpegSemaphore = new Semaphore(FFMPEG_MAX_CONCURRENT);
++const parseProgressFromLine = (
++	line: string,
++	totalDuration: number,
++	onProgress: (percent: number) => void,
++): void => {
++	if (totalDuration <= 0) return;
+ 
+-export const getFfmpegPath = (): string => ffmpegInstaller.path;
++	const match = /time=(\d{2}:\d{2}:\d{2}\.\d+)/.exec(line);
++	if (!match?.[1]) return;
++
++	const [hoursText, minsText, secsText] = match[1].split(":");
++	if (hoursText === undefined || minsText === undefined || secsText === undefined) {
++		return;
++	}
++
++	const hours = Number.parseFloat(hoursText);
++	const mins = Number.parseFloat(minsText);
++	const secs = Number.parseFloat(secsText);
++	const currentSeconds = hours * 3600 + mins * 60 + secs;
++	const percent = (currentSeconds / totalDuration) * 100;
++	onProgress(Math.min(99, Math.max(0, Math.round(percent))));
++};
++
++const makeStderrHandler = (
++	totalDuration: number,
++	onProgress?: (percent: number) => void,
++): { onData: (chunk: Buffer) => void; getBuffer: () => string } => {
++	let stderrBuffer = "";
++	let lineBuffer = "";
++	return {
++		onData: (chunk: Buffer): void => {
++			const text = chunk.toString();
++			stderrBuffer = `${stderrBuffer + text}\n`.slice(-32768);
++			if (onProgress) {
++				lineBuffer += text;
++				const lines = lineBuffer.split("\n");
++				lineBuffer = lines.pop() ?? "";
++				for (const line of lines) {
++					parseProgressFromLine(line, totalDuration, onProgress);
++				}
++			}
++		},
++		getBuffer: () => stderrBuffer,
++	};
++};
++
++const getFfmpegPath = (): string => ffmpegInstaller.path;
+ const getFfprobePath = (): string => ffprobeStatic.path;
+ 
+-export const runFfmpeg = async (
+-	args: string[],
+-	timeoutMs = 0,
+-	signal?: AbortSignal,
+-): Promise<void> => {
+-	if (signal?.aborted) throw new Error("Render cancelled");
+-	await ffmpegSemaphore.acquire();
+-	if (signal?.aborted) {
+-		ffmpegSemaphore.release();
+-		throw new Error("Render cancelled");
++export class FfmpegRunner {
++	private readonly semaphore: Semaphore;
++
++	constructor({ maxConcurrent }: { maxConcurrent: number }) {
++		this.semaphore = new Semaphore(maxConcurrent);
+ 	}
+-	try {
+-		await new Promise<void>((resolve, reject) => {
++
++	async run(args: string[], timeoutMs = 0, signal?: AbortSignal): Promise<void> {
++		if (signal?.aborted) throw new Error("Render cancelled");
++		await this.semaphore.acquire();
++		if (signal?.aborted) {
++			this.semaphore.release();
++			throw new Error("Render cancelled");
++		}
++		try {
++			await new Promise<void>((resolve, reject) => {
++				const ffmpegPath = getFfmpegPath();
++				Logger.logInfo("[ffmpeg] command", { executable: ffmpegPath, firstArg: args[0] });
++
++				const proc = spawn(ffmpegPath, args);
++
++				let stderrBuffer = "";
++				const appendStderr = (chunk: Buffer): void => {
++					stderrBuffer = `${stderrBuffer + chunk.toString()}\n`.slice(-32768);
++				};
++				proc.stderr.on("data", appendStderr);
++
++				const state = { isTimedOut: false, isCancelled: false };
++
++				const onAbort = (): void => {
++					state.isCancelled = true;
++					proc.kill("SIGKILL");
++					reject(new Error("Render cancelled"));
++				};
++				signal?.addEventListener("abort", onAbort, { once: true });
++
++				const timeoutHandle: NodeJS.Timeout | null =
++					timeoutMs > 0
++						? setTimeout(() => {
++								state.isTimedOut = true;
++								proc.kill("SIGKILL");
++								reject(new Error(`FFmpeg transcode timed out after ${timeoutMs / 1000}s`));
++							}, timeoutMs)
++						: null;
++
++				proc.on("close", (code) => {
++					signal?.removeEventListener("abort", onAbort);
++					if (timeoutHandle) clearTimeout(timeoutHandle);
++					if (state.isTimedOut || state.isCancelled) return;
++					if (code === 0) {
++						resolve();
++					} else {
++						reject(
++							new Error(
++								stderrBuffer.trim().length > 0
++									? `FFmpeg exited with code ${code}\n\nFFmpeg stderr (tail):\n${stderrBuffer}`
++									: `FFmpeg exited with code ${code}`,
++							),
++						);
++					}
++				});
++
++				proc.on("error", (err) => {
++					signal?.removeEventListener("abort", onAbort);
++					if (timeoutHandle) clearTimeout(timeoutHandle);
++					if (!state.isTimedOut && !state.isCancelled) reject(err);
++				});
++			});
++		} finally {
++			this.semaphore.release();
++		}
++	}
++
++	async runToStream(
++		args: string[],
++		totalDuration: number,
++		storage: StoragePort,
++		s3Key: string,
++		contentType: string,
++		onProgress?: (percent: number) => void,
++		signal?: AbortSignal,
++	): Promise<void> {
++		if (signal?.aborted) throw new Error("Render cancelled");
++		await this.semaphore.acquire();
++		if (signal?.aborted) {
++			this.semaphore.release();
++			throw new Error("Render cancelled");
++		}
++		try {
++			const pass = new PassThrough();
+ 			const ffmpegPath = getFfmpegPath();
+-			Logger.logInfo("[ffmpeg] command", { executable: ffmpegPath, firstArg: args[0] });
+-
+-			const proc = spawn(ffmpegPath, args);
+-
+-			let stderrBuffer = "";
+-			const appendStderr = (chunk: Buffer): void => {
+-				stderrBuffer = `${stderrBuffer + chunk.toString()}\n`.slice(-32768);
+-			};
+-			proc.stderr.on("data", appendStderr);
+-
+-			const state = { isTimedOut: false, isCancelled: false };
+-
+-			const onAbort = (): void => {
+-				state.isCancelled = true;
+-				proc.kill("SIGKILL");
+-				reject(new Error("Render cancelled"));
+-			};
+-			signal?.addEventListener("abort", onAbort, { once: true });
+-
+-			const timeoutHandle: NodeJS.Timeout | null =
+-				timeoutMs > 0
+-					? setTimeout(() => {
+-							state.isTimedOut = true;
+-							proc.kill("SIGKILL");
+-							reject(new Error(`FFmpeg transcode timed out after ${timeoutMs / 1000}s`));
+-						}, timeoutMs)
+-					: null;
+-
+-			proc.on("close", (code) => {
+-				signal?.removeEventListener("abort", onAbort);
+-				if (timeoutHandle) clearTimeout(timeoutHandle);
+-				if (state.isTimedOut || state.isCancelled) return;
+-				if (code === 0) {
+-					resolve();
+-				} else {
+-					reject(
+-						new Error(
+-							stderrBuffer.trim().length > 0
+-								? `FFmpeg exited with code ${code}\n\nFFmpeg stderr (tail):\n${stderrBuffer}`
++			const fullArgs = [...args, FFMPEG_FLAG.PIPE_OUTPUT];
++
++			console.log("[ffmpeg]", ffmpegPath, fullArgs.join(" "));
++			const proc = spawn(ffmpegPath, fullArgs);
++
++			const ffmpegPromise = new Promise<void>((resolve, reject) => {
++				const { onData, getBuffer } = makeStderrHandler(totalDuration, onProgress);
++
++				proc.stderr.on("data", onData);
++
++				proc.stdout.pipe(pass, { end: false });
++
++				const isCancelled = { value: false };
++
++				const onAbort = (): void => {
++					isCancelled.value = true;
++					proc.kill("SIGKILL");
++					pass.destroy(new Error("Render cancelled"));
++					reject(new Error("Render cancelled"));
++				};
++				signal?.addEventListener("abort", onAbort, { once: true });
++
++				proc.on("close", (code) => {
++					signal?.removeEventListener("abort", onAbort);
++					if (isCancelled.value) return;
++					if (code === 0) {
++						pass.end();
++						resolve();
++					} else {
++						const buf = getBuffer();
++						const err = new Error(
++							buf.trim().length > 0
++								? `FFmpeg exited with code ${code}\n\nFFmpeg stderr (tail):\n${buf}`
+ 								: `FFmpeg exited with code ${code}`,
+-						),
+-					);
+-				}
++						);
++						pass.destroy(err);
++						reject(err);
++					}
++				});
++
++				proc.on("error", (err) => {
++					signal?.removeEventListener("abort", onAbort);
++					if (!isCancelled.value) {
++						pass.destroy(err);
++						reject(err);
++					}
++				});
+ 			});
+ 
+-			proc.on("error", (err) => {
+-				signal?.removeEventListener("abort", onAbort);
+-				if (timeoutHandle) clearTimeout(timeoutHandle);
+-				if (!state.isTimedOut && !state.isCancelled) reject(err);
++			try {
++				await Promise.all([ffmpegPromise, storage.uploadStream(pass, s3Key, contentType)]);
++			} catch (err) {
++				try {
++					proc.kill("SIGKILL");
++				} catch {}
++				pass.destroy();
++				throw err;
++			}
++		} finally {
++			this.semaphore.release();
++		}
++	}
++
++	async runToFile(
++		args: string[],
++		outputPath: string,
++		totalDuration: number,
++		onProgress?: (percent: number) => void,
++		signal?: AbortSignal,
++	): Promise<void> {
++		if (signal?.aborted) throw new Error("Render cancelled");
++		await this.semaphore.acquire();
++		if (signal?.aborted) {
++			this.semaphore.release();
++			throw new Error("Render cancelled");
++		}
++		try {
++			await new Promise<void>((resolve, reject) => {
++				const ffmpegPath = getFfmpegPath();
++				const fullArgs = [...args, outputPath];
++
++				console.log("[ffmpeg]", ffmpegPath, fullArgs.join(" "));
++				const proc = spawn(ffmpegPath, fullArgs);
++
++				const { onData, getBuffer } = makeStderrHandler(totalDuration, onProgress);
++
++				proc.stderr.on("data", onData);
++
++				const isCancelled = { value: false };
++
++				const onAbort = (): void => {
++					isCancelled.value = true;
++					proc.kill("SIGKILL");
++					reject(new Error("Render cancelled"));
++				};
++				signal?.addEventListener("abort", onAbort, { once: true });
++
++				proc.on("close", (code) => {
++					signal?.removeEventListener("abort", onAbort);
++					if (isCancelled.value) return;
++					if (code === 0) {
++						resolve();
++					} else {
++						const buf = getBuffer();
++						reject(
++							new Error(
++								buf.trim().length > 0
++									? `FFmpeg exited with code ${code}\n\nFFmpeg stderr (tail):\n${buf}`
++									: `FFmpeg exited with code ${code}`,
++							),
++						);
++					}
++				});
++
++				proc.on("error", (err) => {
++					signal?.removeEventListener("abort", onAbort);
++					if (!isCancelled.value) reject(err);
++				});
+ 			});
+-		});
+-	} finally {
+-		ffmpegSemaphore.release();
++		} finally {
++			this.semaphore.release();
++		}
+ 	}
+-};
++}
+ 
+ const spawnFfprobe = (url: string): Promise<string> =>
+ 	new Promise((resolve, reject) => {
+diff --git a/apps/server/src/infrastructure/ffmpeg/overlays/overlay.service.ts b/apps/server/src/infrastructure/ffmpeg/overlays/overlay.service.ts
+index 8e8ac29..a03c299 100644
+--- a/apps/server/src/infrastructure/ffmpeg/overlays/overlay.service.ts
++++ b/apps/server/src/infrastructure/ffmpeg/overlays/overlay.service.ts
+@@ -1,7 +1,8 @@
+ import type { Overlay } from "@video-editor/contract/internal/edit-video";
+ import { OverlayType } from "@video-editor/contract/internal/shared";
+-import type { EnvConfig } from "../../../config/env.ts";
++import type { CommonEnvConfig } from "../../../config/env.ts";
+ import type { StoragePort } from "../../../shared/application/ports/outbound/StoragePort.ts";
++import type { FfmpegRunner } from "../ffmpeg.utils.ts";
+ import { buildCircleOverlayFilter, prepareCircleOverlay } from "./circle-overlay.service.ts";
+ import { buildImageOverlayFilter, prepareImageOverlay } from "./image-overlay.service.ts";
+ import { buildRectangleOverlayFilter } from "./rectangle-overlay.service.ts";
+@@ -114,7 +115,8 @@ export const prepareOverlays = async (
+ 	overlays: Overlay[],
+ 	tempDir: string,
+ 	storage: StoragePort,
+-	config: EnvConfig,
++	config: CommonEnvConfig,
++	runner: FfmpegRunner,
+ 	signal?: AbortSignal,
+ ): Promise<{ overlayInputs: PreparedOverlayInput[]; hasOverlays: boolean }> => {
+ 	const sortedOverlays = sortOverlaysByRenderOrder(overlays);
+@@ -139,7 +141,7 @@ export const prepareOverlays = async (
+ 				return {
+ 					overlayId: overlay.id,
+ 					overlayType: overlay.type,
+-					path: await prepareVideoOverlay(overlay, tempDir, storage, config, signal),
++					path: await prepareVideoOverlay(overlay, tempDir, storage, config, runner, signal),
+ 				};
+ 			}
+ 			if (overlay.type === OverlayType.shape) {
+diff --git a/apps/server/src/infrastructure/ffmpeg/overlays/video-overlay.service.ts b/apps/server/src/infrastructure/ffmpeg/overlays/video-overlay.service.ts
+index 5ad7d45..b9dc814 100644
+--- a/apps/server/src/infrastructure/ffmpeg/overlays/video-overlay.service.ts
++++ b/apps/server/src/infrastructure/ffmpeg/overlays/video-overlay.service.ts
+@@ -1,11 +1,11 @@
+ import { promises as fsp } from "node:fs";
+ import path from "node:path";
+ import type { VideoOverlay } from "@video-editor/contract/internal/edit-video";
+-import type { EnvConfig } from "../../../config/env.ts";
++import type { CommonEnvConfig } from "../../../config/env.ts";
+ import type { StoragePort } from "../../../shared/application/ports/outbound/StoragePort.ts";
+ import { normalizeFfmpegDuration, normalizeFfmpegTime } from "../../../shared/utils/time.utils.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "../ffmpeg.consts.ts";
+-import { runFfmpeg } from "../ffmpeg.utils.ts";
++import type { FfmpegRunner } from "../ffmpeg.utils.ts";
+ import { isMpdUrl, processMpdSource } from "../source-processors/dash-process.ts";
+ import { isHlsUrl, processHlsSource } from "../source-processors/hls-process.ts";
+ import { buildEnableExpression } from "./overlay-utils.ts";
+@@ -123,7 +123,8 @@ export const prepareVideoOverlay = async (
+ 	overlay: VideoOverlay,
+ 	tempDir: string,
+ 	storage: StoragePort,
+-	config: EnvConfig,
++	config: CommonEnvConfig,
++	runner: FfmpegRunner,
+ 	signal?: AbortSignal,
+ ): Promise<string> => {
+ 	const downloadedPath = path.join(tempDir, `video-overlay-src-${overlay.id}.mp4`);
+@@ -141,6 +142,7 @@ export const prepareVideoOverlay = async (
+ 			downloadedPath,
+ 			false,
+ 			config,
++			runner,
+ 			signal,
+ 		);
+ 	} else if (isHlsUrl(overlay.sourceUrl)) {
+@@ -154,6 +156,7 @@ export const prepareVideoOverlay = async (
+ 			},
+ 			downloadedPath,
+ 			config,
++			runner,
+ 			signal,
+ 		);
+ 	} else {
+@@ -204,7 +207,7 @@ export const prepareVideoOverlay = async (
+ 		preparedPath,
+ 	);
+ 
+-	await runFfmpeg(args, 0, signal);
++	await runner.run(args, 0, signal);
+ 
+ 	await fsp.unlink(downloadedPath).catch(() => undefined);
+ 	return preparedPath;
+diff --git a/apps/server/src/infrastructure/ffmpeg/source-processors/audio-process.ts b/apps/server/src/infrastructure/ffmpeg/source-processors/audio-process.ts
+index 0a00765..0ee706c 100644
+--- a/apps/server/src/infrastructure/ffmpeg/source-processors/audio-process.ts
++++ b/apps/server/src/infrastructure/ffmpeg/source-processors/audio-process.ts
+@@ -1,11 +1,11 @@
+ import { promises as fsp } from "node:fs";
+ import path from "node:path";
+ import type { AudioSource } from "@video-editor/contract/internal/edit-video";
+-import type { EnvConfig } from "../../../config/env.ts";
++import type { CommonEnvConfig } from "../../../config/env.ts";
+ import type { StoragePort } from "../../../shared/application/ports/outbound/StoragePort.ts";
+ import { normalizeFfmpegDuration, normalizeFfmpegTime } from "../../../shared/utils/time.utils.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "../ffmpeg.consts.ts";
+-import { hasAudioStream, runFfmpeg } from "../ffmpeg.utils.ts";
++import { type FfmpegRunner, hasAudioStream } from "../ffmpeg.utils.ts";
+ import { isMpdUrl } from "./dash-process.ts";
+ import { isHlsUrl } from "./hls-process.ts";
+ 
+@@ -98,6 +98,7 @@ const processAudioFile = async (
+ 	index: number,
+ 	tempDir: string,
+ 	totalDurationSegments: number,
++	runner: FfmpegRunner,
+ 	signal?: AbortSignal,
+ ): Promise<string> => {
+ 	const processing = calculateAudioProcessing(audio, totalDurationSegments);
+@@ -153,7 +154,7 @@ const processAudioFile = async (
+ 		processedPath,
+ 	);
+ 
+-	await runFfmpeg(args, 0, signal);
++	await runner.run(args, 0, signal);
+ 
+ 	return processedPath;
+ };
+@@ -161,7 +162,8 @@ const processAudioFile = async (
+ const materializeStreamingAudioSource = async (
+ 	audio: AudioSource,
+ 	audioPath: string,
+-	config: EnvConfig,
++	config: CommonEnvConfig,
++	runner: FfmpegRunner,
+ 	signal?: AbortSignal,
+ ): Promise<void> => {
+ 	const args = [
+@@ -181,7 +183,7 @@ const materializeStreamingAudioSource = async (
+ 		audioPath,
+ 	];
+ 
+-	await runFfmpeg(args, config.TRANSCODE_TIMEOUT_MS, signal);
++	await runner.run(args, config.TRANSCODE_TIMEOUT_MS, signal);
+ };
+ 
+ export const prepareAudioSources = async (
+@@ -189,7 +191,8 @@ export const prepareAudioSources = async (
+ 	tempDir: string,
+ 	totalDurationSegments: number,
+ 	storage: StoragePort,
+-	config: EnvConfig,
++	config: CommonEnvConfig,
++	runner: FfmpegRunner,
+ 	signal?: AbortSignal,
+ ): Promise<{
+ 	audioPaths: { path: string; startTime: number; volume: number }[];
+@@ -220,7 +223,7 @@ export const prepareAudioSources = async (
+ 							return null;
+ 						}
+ 					}
+-					await materializeStreamingAudioSource(audio, audioPath, config, signal);
++					await materializeStreamingAudioSource(audio, audioPath, config, runner, signal);
+ 				} else {
+ 					await storage.downloadToFile(audio.url, audioPath);
+ 				}
+@@ -241,6 +244,7 @@ export const prepareAudioSources = async (
+ 					index,
+ 					tempDir,
+ 					totalDurationSegments,
++					runner,
+ 					signal,
+ 				);
+ 
+diff --git a/apps/server/src/infrastructure/ffmpeg/source-processors/dash-process.ts b/apps/server/src/infrastructure/ffmpeg/source-processors/dash-process.ts
+index 9dd6d24..c74f433 100644
+--- a/apps/server/src/infrastructure/ffmpeg/source-processors/dash-process.ts
++++ b/apps/server/src/infrastructure/ffmpeg/source-processors/dash-process.ts
+@@ -1,10 +1,10 @@
+ import { promises as fsp } from "node:fs";
+ import type { VideoSource } from "@video-editor/contract/internal/edit-video";
+ import { Logger } from "@ztube/observability";
+-import type { EnvConfig } from "../../../config/env.ts";
++import type { CommonEnvConfig } from "../../../config/env.ts";
+ import { validateMpdRestrictions } from "../../../features/render/domain/video-segment.policy.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "../ffmpeg.consts.ts";
+-import { runFfmpeg } from "../ffmpeg.utils.ts";
++import type { FfmpegRunner } from "../ffmpeg.utils.ts";
+ 
+ export const isMpdUrl = (url: string): boolean => url.toLowerCase().endsWith(".mpd");
+ 
+@@ -12,7 +12,8 @@ export const processMpdSource = async (
+ 	source: VideoSource,
+ 	sourcePath: string,
+ 	hasMpdSource: boolean,
+-	config: EnvConfig,
++	config: CommonEnvConfig,
++	runner: FfmpegRunner,
+ 	signal?: AbortSignal,
+ ): Promise<void> => {
+ 	Logger.logInfo("[ffmpeg] processing MPD stream", { url: source.url });
+@@ -52,7 +53,7 @@ export const processMpdSource = async (
+ 		sourcePath,
+ 	];
+ 
+-	await runFfmpeg(args, config.ENABLE_MPD_RESTRICTIONS ? config.TRANSCODE_TIMEOUT_MS : 0, signal);
++	await runner.run(args, config.ENABLE_MPD_RESTRICTIONS ? config.TRANSCODE_TIMEOUT_MS : 0, signal);
+ 
+ 	if (config.ENABLE_MPD_RESTRICTIONS) {
+ 		const stats = await fsp.stat(sourcePath);
+diff --git a/apps/server/src/infrastructure/ffmpeg/source-processors/hls-process.ts b/apps/server/src/infrastructure/ffmpeg/source-processors/hls-process.ts
+index dc8783c..dd57008 100644
+--- a/apps/server/src/infrastructure/ffmpeg/source-processors/hls-process.ts
++++ b/apps/server/src/infrastructure/ffmpeg/source-processors/hls-process.ts
+@@ -1,8 +1,8 @@
+ import type { VideoSource } from "@video-editor/contract/internal/edit-video";
+ import { Logger } from "@ztube/observability";
+-import type { EnvConfig } from "../../../config/env.ts";
++import type { CommonEnvConfig } from "../../../config/env.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "../ffmpeg.consts.ts";
+-import { runFfmpeg } from "../ffmpeg.utils.ts";
++import type { FfmpegRunner } from "../ffmpeg.utils.ts";
+ 
+ export const isHlsUrl = (url: string): boolean => {
+ 	try {
+@@ -15,7 +15,8 @@ export const isHlsUrl = (url: string): boolean => {
+ export const processHlsSource = async (
+ 	source: VideoSource,
+ 	sourcePath: string,
+-	config: EnvConfig,
++	config: CommonEnvConfig,
++	runner: FfmpegRunner,
+ 	signal?: AbortSignal,
+ ): Promise<void> => {
+ 	Logger.logInfo("[ffmpeg] transcoding HLS to MP4", { url: source.url });
+@@ -49,7 +50,7 @@ export const processHlsSource = async (
+ 		sourcePath,
+ 	];
+ 
+-	await runFfmpeg(args, config.ENABLE_MPD_RESTRICTIONS ? config.TRANSCODE_TIMEOUT_MS : 0, signal);
++	await runner.run(args, config.ENABLE_MPD_RESTRICTIONS ? config.TRANSCODE_TIMEOUT_MS : 0, signal);
+ 
+ 	Logger.logInfo("[ffmpeg] HLS transcoded");
+ };
+diff --git a/apps/server/src/infrastructure/ffmpeg/source-processors/image-process.ts b/apps/server/src/infrastructure/ffmpeg/source-processors/image-process.ts
+index 9d7cdca..1fe09ba 100644
+--- a/apps/server/src/infrastructure/ffmpeg/source-processors/image-process.ts
++++ b/apps/server/src/infrastructure/ffmpeg/source-processors/image-process.ts
+@@ -3,7 +3,7 @@ import type { VideoSource } from "@video-editor/contract/internal/edit-video";
+ import sharp from "sharp";
+ import type { StoragePort } from "../../../shared/application/ports/outbound/StoragePort.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "../ffmpeg.consts.ts";
+-import { runFfmpeg } from "../ffmpeg.utils.ts";
++import type { FfmpegRunner } from "../ffmpeg.utils.ts";
+ 
+ export const getImageExtension = (url: string): string => {
+ 	const clean = url.split("?")[0] || url;
+@@ -26,6 +26,7 @@ export const processImageSource = async (
+ 	sourcePath: string,
+ 	tempDir: string,
+ 	storage: StoragePort,
++	runner: FfmpegRunner,
+ ): Promise<void> => {
+ 	const originalExt = getImageExtension(source.url);
+ 	const downloadedImagePath = createImagePath(tempDir, originalExt);
+@@ -65,5 +66,5 @@ export const processImageSource = async (
+ 		sourcePath,
+ 	];
+ 
+-	await runFfmpeg(args);
++	await runner.run(args);
+ };
+diff --git a/apps/server/src/infrastructure/ffmpeg/source-processors/process-sources.ts b/apps/server/src/infrastructure/ffmpeg/source-processors/process-sources.ts
+index 7d3fd8c..b4fd948 100644
+--- a/apps/server/src/infrastructure/ffmpeg/source-processors/process-sources.ts
++++ b/apps/server/src/infrastructure/ffmpeg/source-processors/process-sources.ts
+@@ -1,11 +1,11 @@
+ import { existsSync, promises as fsp } from "node:fs";
+ import path from "node:path";
+ import type { VideoSource } from "@video-editor/contract/internal/edit-video";
+-import type { EnvConfig } from "../../../config/env.ts";
++import type { CommonEnvConfig } from "../../../config/env.ts";
+ import type { StoragePort } from "../../../shared/application/ports/outbound/StoragePort.ts";
+ import { normalizeFfmpegDuration, normalizeFfmpegTime } from "../../../shared/utils/time.utils.ts";
+ import { FFMPEG_COMMAND, FFMPEG_FLAG } from "../ffmpeg.consts.ts";
+-import { runFfmpeg } from "../ffmpeg.utils.ts";
++import type { FfmpegRunner } from "../ffmpeg.utils.ts";
+ import { isMpdUrl, processMpdSource } from "./dash-process.ts";
+ import { isHlsUrl, processHlsSource } from "./hls-process.ts";
+ import { processImageSource } from "./image-process.ts";
+@@ -14,7 +14,8 @@ export const processSources = async (
+ 	sources: VideoSource[],
+ 	tempDir: string,
+ 	storage: StoragePort,
+-	config: EnvConfig,
++	config: CommonEnvConfig,
++	runner: FfmpegRunner,
+ 	signal?: AbortSignal,
+ ): Promise<string> => {
+ 	if (sources.length === 1) {
+@@ -26,16 +27,25 @@ export const processSources = async (
+ 			tempDir,
+ 			storage,
+ 			config,
++			runner,
+ 			signal,
+ 		);
+ 	}
+ 	const hasMpdSource = sources.some((source) => isMpdUrl(source.url) || isHlsUrl(source.url));
+-	const sourcePaths = await processMultipleSources(sources, tempDir, storage, config, signal);
++	const sourcePaths = await processMultipleSources(
++		sources,
++		tempDir,
++		storage,
++		config,
++		runner,
++		signal,
++	);
+ 	const concatenatedPath = await concatenateSources(
+ 		sourcePaths,
+ 		tempDir,
+ 		hasMpdSource,
+ 		config,
++		runner,
+ 		signal,
+ 	);
+ 
+@@ -45,6 +55,7 @@ export const processSources = async (
+ const generateBlankVideoSegment = async (
+ 	source: VideoSource,
+ 	outputPath: string,
++	runner: FfmpegRunner,
+ ): Promise<void> => {
+ 	const url = new URL(source.url);
+ 	const width = Number.parseInt(url.searchParams.get("w") ?? "1920", 10);
+@@ -79,7 +90,7 @@ const generateBlankVideoSegment = async (
+ 		outputPath,
+ 	];
+ 
+-	await runFfmpeg(args);
++	await runner.run(args);
+ };
+ 
+ const processSingleSource = async (
+@@ -87,26 +98,27 @@ const processSingleSource = async (
+ 	sourcePath: string,
+ 	tempDir: string,
+ 	storage: StoragePort,
+-	config: EnvConfig,
++	config: CommonEnvConfig,
++	runner: FfmpegRunner,
+ 	signal?: AbortSignal,
+ ): Promise<string> => {
+ 	if (source.url.startsWith("internal://blank")) {
+-		await generateBlankVideoSegment(source, sourcePath);
++		await generateBlankVideoSegment(source, sourcePath, runner);
+ 
+ 		return sourcePath;
+ 	}
+ 	if (source.type === "image") {
+-		await processImageSource(source, sourcePath, tempDir, storage);
++		await processImageSource(source, sourcePath, tempDir, storage, runner);
+ 
+ 		return sourcePath;
+ 	}
+ 	if (isMpdUrl(source.url)) {
+-		await processMpdSource(source, sourcePath, false, config, signal);
++		await processMpdSource(source, sourcePath, false, config, runner, signal);
+ 
+ 		return sourcePath;
+ 	}
+ 	if (isHlsUrl(source.url)) {
+-		await processHlsSource(source, sourcePath, config, signal);
++		await processHlsSource(source, sourcePath, config, runner, signal);
+ 
+ 		return sourcePath;
+ 	}
+@@ -152,7 +164,7 @@ const processSingleSource = async (
+ 			trimmedPath,
+ 		);
+ 
+-		await runFfmpeg(args, 0, signal);
++		await runner.run(args, 0, signal);
+ 		await fsp.rename(trimmedPath, sourcePath);
+ 	}
+ 
+@@ -163,13 +175,22 @@ const processMultipleSources = async (
+ 	sources: VideoSource[],
+ 	tempDir: string,
+ 	storage: StoragePort,
+-	config: EnvConfig,
++	config: CommonEnvConfig,
++	runner: FfmpegRunner,
+ 	signal?: AbortSignal,
+ ): Promise<string[]> => {
+ 	const sourcePaths = await Promise.all(
+ 		sources.map(async (source, index) => {
+ 			const sourcePath = path.join(tempDir, `source-${index}.mp4`);
+-			return await processSingleSource(source, sourcePath, tempDir, storage, config, signal);
++			return await processSingleSource(
++				source,
++				sourcePath,
++				tempDir,
++				storage,
++				config,
++				runner,
++				signal,
++			);
+ 		}),
+ 	);
+ 
+@@ -180,7 +201,8 @@ const concatenateSources = async (
+ 	sourcePaths: string[],
+ 	tempDir: string,
+ 	hasMpdSource: boolean,
+-	config: EnvConfig,
++	config: CommonEnvConfig,
++	runner: FfmpegRunner,
+ 	signal?: AbortSignal,
+ ): Promise<string> => {
+ 	const missing = sourcePaths.filter((p) => !existsSync(p));
+@@ -234,7 +256,7 @@ const concatenateSources = async (
+ 		concatenatedPath,
+ 	];
+ 
+-	await runFfmpeg(args, 0, signal);
++	await runner.run(args, 0, signal);
+ 
+ 	return concatenatedPath;
+ };
+diff --git a/apps/server/src/worker.ts b/apps/server/src/worker.ts
+index 9d7383f..06371a8 100644
+--- a/apps/server/src/worker.ts
++++ b/apps/server/src/worker.ts
+@@ -1,7 +1,7 @@
+ import { initTelemetry, Logger } from "@ztube/observability";
+-import { parseEnv } from "./config/env.ts";
++import { parseWorkerEnv } from "./config/env.ts";
+ 
+-const config = parseEnv();
++const config = parseWorkerEnv();
+ 
+ if (config.OTEL_ENDPOINT) {
+ 	initTelemetry({
+diff --git a/deploy/worker/configmap.yaml b/deploy/worker/configmap.yaml
+index a260824..914729d 100644
+--- a/deploy/worker/configmap.yaml
++++ b/deploy/worker/configmap.yaml
+@@ -9,21 +9,15 @@ data:
+   # AMQP prefetch and in-process render concurrency. Broker is the only backpressure.
+   WORKER_CONCURRENCY: "1"
+ 
+-  # Render output (must match the API's S3_OUTPUT_PREFIX — idempotency depends on
+-  # a deterministic key derived from jobId).
++  # Render output. Must match the API's S3_OUTPUT_PREFIX — idempotency depends on
++  # a deterministic key derived from jobId.
+   S3_BUCKET: "# TODO: your-bucket-name"
+   S3_REGION: "us-east-1"
+   S3_ENDPOINT: "# TODO: https://your-minio.internal"
+   S3_FORCE_PATH_STYLE: "true"
+-  S3_UPLOAD_PREFIX: "uploads"
+   S3_OUTPUT_PREFIX: "output"
+-  S3_AUTO_CREATE_BUCKET: "false"
+   RENDER_URL_EXPIRY_SECONDS: "86400"
+ 
+-  # Must match the API config — both processes assert the same render queue
+-  # topology, so a mismatch causes PRECONDITION_FAILED on startup.
+-  UPLOAD_MAX_SIZE_BYTES: "524288000"
+-
+   # FFmpeg
+   FFMPEG_PRESET: "veryfast"
+   FFMPEG_CRF: "20"
+@@ -35,12 +29,4 @@ data:
+   MPD_TRANSCODE_CRF_MULTI: "10"
+   MPD_TRANSCODE_CRF_SINGLE: "18"
+   MPD_TRANSCODE_PRESET: "medium"
+-
+-  # Preview-source vars are not used by the worker, but the same image's env
+-  # schema requires them. Keep parity with server config for safety.
+-  CORE_BASE_URL: "http://core:8080/private"
+-  SERVER_BASE_URL: "http://video-editor-worker:8081"
+-  MAX_PREVIEW_DURATION_MS: "3600000"
+-  PREVIEW_JOB_TTL_SECONDS: "86400"
+-  S3_PREVIEW_PREFIX: "preview"
+   ENABLE_MPD_RESTRICTIONS: "true"

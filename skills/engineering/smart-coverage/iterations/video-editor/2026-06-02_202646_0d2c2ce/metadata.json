@@ -1,0 +1,19 @@
+{
+  "iteration_id": "2026-06-02_202646_0d2c2ce",
+  "repo": "video-editor",
+  "repo_root": "/Users/danielrispler/work/video-editor",
+  "branch": "main",
+  "sha": "0d2c2ce858d25f326c4034d66cddc63cabc329bc",
+  "target": "main",
+  "diff_files": 54,
+  "diff_lines": 2619,
+  "untracked_files_included": 3,
+  "timestamps": {
+    "started": "2026-06-02T17:26:46Z",
+    "baseline_duration_s": 157,
+    "treatment_duration_s": 450,
+    "finished": "2026-06-02T17:39:15Z"
+  },
+  "rating": "treatment",
+  "rating_note": "Treatment wins narrowly: structure (buckets, exit-doors, When/Then names, Skipped/Already-Covered ledgers) beats baseline format. Both converged on top Critical/High picks. Baseline retained edge via non-test review findings (timeout asymmetry, logging inconsistency) and the race-guard rationale on useCropStore — see review.md for suggested skill changes."
+}

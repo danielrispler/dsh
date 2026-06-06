@@ -1,0 +1,19 @@
+{
+  "iteration_id": "2026-06-01_094506_4e93427",
+  "repo": "video-editor",
+  "repo_root": "/Users/danielrispler/work/video-editor",
+  "branch": "main",
+  "sha": "4e93427fa0e592649b578f467b18190b453926ef",
+  "target": "main",
+  "diff_files": 88,
+  "diff_lines": 4608,
+  "untracked_files_included": 26,
+  "timestamps": {
+    "started": "2026-06-01T06:45:14Z",
+    "baseline_duration_s": 233,
+    "treatment_duration_s": 1127,
+    "finished": "2026-06-01T07:09:29Z"
+  },
+  "rating": "baseline",
+  "rating_note": "see review.md — treatment falsely skipped ~30 files under 'coverage migrates' premise; pre-move coverage was actually zero for edit-video/upload features and internal/* schemas. Baseline caught real bugs (parsePx NaN, shapeOverlay unbounded, cropRegion.min(2), videoOverlay.trackOrder required) that treatment missed."
+}
