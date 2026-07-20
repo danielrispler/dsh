@@ -1,0 +1,4950 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 62a91d2..2636a5b 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -27,6 +27,7 @@ Per-app guidance:
+ - [apps/frontend/CLAUDE.md](apps/frontend/CLAUDE.md)
+ - [apps/server/CLAUDE.md](apps/server/CLAUDE.md)
+ - [apps/iframe-demo/CLAUDE.md](apps/iframe-demo/CLAUDE.md)
++- [apps/core-mock/CLAUDE.md](apps/core-mock/CLAUDE.md)
+ - [apps/mock-vod/CLAUDE.md](apps/mock-vod/CLAUDE.md)
+ - [packages/contract/CLAUDE.md](packages/contract/CLAUDE.md)
+ 
+@@ -125,17 +126,22 @@ Worker manifests live in `deploy/worker/`. See [docs/adr/0005-render-worker-depl
+ 
+ ### Iframe Demo (`apps/iframe-demo`)
+ 
+-Angular 21 standalone app on port 8080. Embeds `/editor/embed` in a floating, draggable/resizable iframe. Provides a control panel to send `EDITOR_ADD_PREVIEW_ITEM` and `EDITOR_CLEAR_PROJECT` messages and displays responses. Primary harness for testing the iframe integration.
++Angular 21 standalone app on port 8080. Embeds `/editor/embed` in a floating, draggable/resizable iframe. Provides a control panel to send `EDITOR_ADD_PREVIEW_ITEM` (recording-range form), `EDITOR_ADD_MEDIA { mediaId }` (id text input + preset chips backed by `apps/core-mock`), and `EDITOR_CLEAR_PROJECT`; displays responses. Primary harness for testing the iframe integration.
+ 
+ → See [apps/iframe-demo/CLAUDE.md](apps/iframe-demo/CLAUDE.md) for full detail.
+ 
+ ### Package: contract (`packages/contract`)
+ 
+-Published as `@video-editor/contract`. Two sub-paths:
+-- `/iframe` — Zod schemas + types for the editor↔parent postMessage protocol.
+-- `/events` — versioned `Envelope<T>` + Zod schemas for AMQP events published to the `video-editor` topic exchange (`export.started`, `export.completed`, `export.failed`). External teams bind queues against this exchange and import schemas from `/events` for consumer-side validation.
++Published as `@video-editor/contract`. **No root barrel** — every caller imports a subpath so the bucket they touch is explicit. Four subpath buckets:
+ 
+-Root export (`@video-editor/contract`) re-exports `iframe` + shared `SavedMediaItem`/`SavedMediaPayload`.
++| Subpath | Purpose |
++|---|---|
++| `/iframe/from-parent` | Parent → editor postMessage Zod schemas + types |
++| `/iframe/to-parent` | Editor → parent postMessage Zod schemas + types |
++| `/events` | Versioned `Envelope<T>` + Zod schemas for AMQP events on the `video-editor` topic exchange (`export.started`, `export.completed`, `export.failed`). External teams bind queues here and import schemas for consumer-side validation |
++| `/internal/<feature>` | Server-owner HTTP API schemas (`upload`, `edit-video`, `render`, `shared`). **`apps/server` only** — external consumers must not import. See [docs/adr/0004-server-http-schemas-in-shared-contract-package.md](docs/adr/0004-server-http-schemas-in-shared-contract-package.md) |
++
++Current major **`0.2.0`** (bumped when the from-parent union dropped `imagePayloadSchema` + `mediaPayloadSchema` for the new top-level `EDITOR_ADD_MEDIA` message — see [docs/adr/0007-stored-media-id-only-intake.md](docs/adr/0007-stored-media-id-only-intake.md)). `SavedMediaItem` / `SavedMediaPayload` live in `src/shared/saved-media.ts` and are re-exported from both `/iframe/to-parent` and `/events`.
+ 
+ → See [packages/contract/CLAUDE.md](packages/contract/CLAUDE.md) for full detail and [packages/contract/src/events/README.md](packages/contract/src/events/README.md) for the consumer onboarding doc.
+ 
+diff --git a/CONTEXT.md b/CONTEXT.md
+index a401717..7bf469e 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -34,6 +34,12 @@ Every TS type in the package is `z.infer<typeof schema>` so schemas and types ca
+ 
+ **Broker TLS** — closed-network broker uses client mutual TLS. `QUEUE_URL` scheme drives the behavior: `amqps://` (prod) → process reads three PEM files at boot from hardcoded paths (`/bundle.pem` for the private CA, `/tmp/certificates/rabbitmq/rabbit_cert.pem` + `rabbit_key.pem` for client identity) and passes them as socket options to every `amqplib.connect()`. `amqp://` (dev) → plain connect, no file reads. URL carries no userinfo in prod — the broker authenticates clients by certificate.
+ 
++## Stored Media
++
++**Stored Media** — an item the parent drops into the editor by id alone via `EDITOR_ADD_MEDIA { mediaId }`. The editor calls Core `GET /private/media/{id}/watch` to resolve `{ type, name }`. `type ∈ "Image" | "ClipVideo" | "UploadedVideo" | "ScreenShotFromLive"`. Image / screenshot play directly from `${VITE_CORE_EXTENSION}/storage/{id}/image` with HttpOnly `ztube-token` cookie auth; duration defaults to 5000 ms (editor-side, not parent-controlled). Clip / uploaded video go through the editor backend's preview-source pipeline with source type `{ type: "media-id", mediaId }` → `/private/videos/{id}/play` → MPD (`/private/storage/{id}/mpd`) → HLS assembly. Same MPD-to-HLS code path as Channel Range, but Core-served (no `vod-token` — segments authenticate purely on the session cookie).
++
++Editor responses echo the `mediaId` on `EDITOR_PREVIEW_ITEM_ADDED { mediaId, itemId }` and `EDITOR_PREVIEW_ITEM_REJECTED { mediaId, reason }`. Two adds with the same `mediaId` are processed twice — there is no de-duplication. Core 404 maps to `reason: "media not found"`; 5xx / network maps to `reason: "core unavailable"`.
++
+ ## Editor Composition
+ 
+ **IDesign** — the serialized editor state: tracks, track items, canvas size, FPS. This is the payload the frontend sends to `/render`. It is the single source of truth for what the rendered output will look like.
+@@ -76,6 +82,13 @@ Every TS type in the package is `z.infer<typeof schema>` so schemas and types ca
+ 
+ **Channel Range** — a preview source type (`{ type: "channel-range", channelId, startTimeMs, endTimeMs }`) that references a time window of a live channel recording. The server resolves it by calling Core's Channel Play API, fetching the DASH MPD, and assembling an HLS Playlist. The editor always works with the resolved HLS Playlist, never directly with the Channel Range.
+ 
++**Video Play API** — `GET /private/videos/:id/play` on Core (for `ClipVideo` / `UploadedVideo` stored-media types). Returns `{ url, timeRanges }`:
++- `url` — absolute MPD document URL. In dev mocks + prod, points back at Core (e.g. `/private/storage/{id}/mpd`) — Core serves segments directly under the session cookie, no separate VOD origin.
++- `timeRanges[0]` — `[mediaCreatedAtMs, mediaCreatedAtMs + durationMs]`. The wall-clock anchor at media creation drives `sourceOffsetMs` downstream the same way Channel Range does.
++- **No `token` field.** Core serves segments under HttpOnly `ztube-token` cookie auth, so the editor backend omits the `vod-token` header on MPD + segment fetches for `media-id`-sourced previews. The segment-proxy signed URLs encode `kind=media-id` so the proxy knows not to attach a `vod-token`.
++
++**Media Watch API** — `GET /private/media/:id/watch` on Core. Returns `{ type, name }`. The editor calls this on every `EDITOR_ADD_MEDIA` to branch on stored-media subtype.
++
+ **HLS Playlist** — a server-assembled `.m3u8` file built from a DASH MPD. Not a native recording format — the editor server synthesizes it so the browser's HLS stack can play DASH-origin content without needing MSE/DASH.js. Stored in S3 after assembly; URL is presigned.
+ 
+ **Segment Proxy** — the `GET /editor/segment` endpoint. Browsers cannot attach custom `vod-token` headers to media segment fetches (HLS). The server acts as a proxy: it validates the HMAC-signed segment URL, injects the `vod-token` header, and streams the bytes from VOD to the browser.
+diff --git a/apps/core-mock/CLAUDE.md b/apps/core-mock/CLAUDE.md
+index 84b9774..74c4845 100644
+--- a/apps/core-mock/CLAUDE.md
++++ b/apps/core-mock/CLAUDE.md
+@@ -13,6 +13,9 @@ The real Core service is unreachable from a dev box (closed network). This mock
+ | GET | `/private/users/me` | Returns a hard-coded user identity |
+ | GET | `/private/media/clip/managed-virtual-channels` | Returns a hard-coded channel list |
+ | GET | `/private/channels/:channelId/play?start&end` | Mints a `vod-token`, registers it with `apps/mock-vod` over `POST /__internal/register-token`, and returns `{ url, timeRanges, token }` with `url` pointing at mock-vod |
++| GET | `/private/storage/:id/image` | Serves a bundled jpg fixture for known ids (`img-001`/`img-002`/`img-003`/`screenshot-001`), 404 otherwise. Bytes live on disk under `fixtures/images/`; loader in `src/fixtures/images.ts`. |
++| GET | `/private/storage/:id/clip` | Serves a 15s 1280×720 H.264/AAC fragmented mp4 (`testsrc2` + DEMO CLIP overlay + 440 Hz tone) for id `demo-clip-001`, 404 otherwise. Bytes live at `fixtures/clip/demo-clip-001.mp4`; loader in `src/fixtures/clip.ts`. |
++| GET | `/private/storage/:id/mpd` and segment paths | Per-id on-disk DASH bundle under `fixtures/dash/<id>/` (manifest + multi-representation init + segments). Two distinct fixtures: `demo-clip-001` (`testsrc2` + 440 Hz) and `uploaded-001` (`smptehdbars` + 880 Hz). Loader in `src/fixtures/dash.ts`. |
+ 
+ ## Cross-service trust
+ 
+diff --git a/apps/core-mock/README.md b/apps/core-mock/README.md
+index c58e446..6c261d6 100644
+--- a/apps/core-mock/README.md
++++ b/apps/core-mock/README.md
+@@ -1,6 +1,6 @@
+ # @video-editor/core-mock
+ 
+-Mock Core service for the video-editor monorepo. Emulates the upstream Core HTTP contract (user identity, channel list, Channel Play API) so `apps/server` can run locally against the same code path used in production.
++Mock Core service for the video-editor monorepo. Emulates the upstream Core HTTP contract (user identity, channel list, Channel Play API, stored-media watch + play APIs, bundled image/clip/DASH fixtures) so `apps/server` and the editor frontend can run locally against the same code path used in production. Also backs the stored-media `EDITOR_ADD_MEDIA` flow used by `apps/iframe-demo`.
+ 
+ Port: **8002** (default). Pairs with `apps/mock-vod` (5050) — coordinates via `POST /__internal/register-token` so cross-service `vod-token` trust mirrors the real Core/VOD relationship.
+ 
+@@ -11,5 +11,10 @@ Routes:
+ | GET | `/private/users/me` | Hard-coded user identity |
+ | GET | `/private/media/clip/managed-virtual-channels` | Hard-coded channel list |
+ | GET | `/private/channels/:channelId/play?start&end` | Mints a `vod-token`, registers it with `apps/mock-vod`, returns `{ url, timeRanges, token }` |
++| GET | `/private/media/:id/watch` | Returns `{ type, name }` for the stored-media id. Drives the editor's branching on `Image` / `ClipVideo` / `UploadedVideo` / `ScreenShotFromLive` |
++| GET | `/private/videos/:id/play` | Returns `{ url, timeRanges }` for video-typed media. `url` points back at this mock's `/private/storage/:id/mpd`. No `token` — Core serves segments under the session cookie |
++| GET | `/private/storage/:id/image` | Bundled jpg for `img-001` / `img-002` / `img-003` / `screenshot-001`, 404 otherwise |
++| GET | `/private/storage/:id/clip` | 15s 1280×720 H.264/AAC fragmented mp4 (`testsrc2` + DEMO CLIP overlay + 440 Hz tone) for `demo-clip-001`, 404 otherwise |
++| GET | `/private/storage/:id/mpd` (+ DASH init/segment paths) | Per-id on-disk DASH bundle (`demo-clip-001` = `testsrc2` + 440 Hz; `uploaded-001` = `smptehdbars` + 880 Hz) |
+ 
+ See [CLAUDE.md](./CLAUDE.md) for the full route shapes, cross-service trust details, env vars, and structure. See [docs/adr/0002-mock-vod-as-separate-app.md](../../docs/adr/0002-mock-vod-as-separate-app.md) for the design rationale.
+diff --git a/apps/core-mock/fixtures/clip/demo-clip-001.mp4 b/apps/core-mock/fixtures/clip/demo-clip-001.mp4
+new file mode 100644
+index 0000000..a3d17fa
+Binary files /dev/null and b/apps/core-mock/fixtures/clip/demo-clip-001.mp4 differ
+diff --git a/apps/core-mock/fixtures/dash/demo-clip-001/init_v0.mp4 b/apps/core-mock/fixtures/dash/demo-clip-001/init_v0.mp4
+new file mode 100644
+index 0000000..d961868
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/demo-clip-001/init_v0.mp4 differ
+diff --git a/apps/core-mock/fixtures/dash/demo-clip-001/init_v1.mp4 b/apps/core-mock/fixtures/dash/demo-clip-001/init_v1.mp4
+new file mode 100644
+index 0000000..2f56f35
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/demo-clip-001/init_v1.mp4 differ
+diff --git a/apps/core-mock/fixtures/dash/demo-clip-001/manifest.mpd b/apps/core-mock/fixtures/dash/demo-clip-001/manifest.mpd
+new file mode 100644
+index 0000000..dd0a995
+--- /dev/null
++++ b/apps/core-mock/fixtures/dash/demo-clip-001/manifest.mpd
+@@ -0,0 +1,39 @@
++<?xml version="1.0" encoding="utf-8"?>
++<MPD xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++	xmlns="urn:mpeg:dash:schema:mpd:2011"
++	xmlns:xlink="http://www.w3.org/1999/xlink"
++	xsi:schemaLocation="urn:mpeg:DASH:schema:MPD:2011 http://standards.iso.org/ittf/PubliclyAvailableStandards/MPEG-DASH_schema_files/DASH-MPD.xsd"
++	profiles="urn:mpeg:dash:profile:isoff-live:2011"
++	type="static"
++	mediaPresentationDuration="PT15.0S"
++	maxSegmentDuration="PT5.0S"
++	minBufferTime="PT10.0S">
++	<ProgramInformation>
++	</ProgramInformation>
++	<ServiceDescription id="0">
++	</ServiceDescription>
++	<Period id="0" start="PT0.0S">
++		<AdaptationSet id="0" contentType="video" startWithSAP="1" segmentAlignment="true" bitstreamSwitching="true" frameRate="25/1" maxWidth="1280" maxHeight="720" par="16:9">
++			<Representation id="0" mimeType="video/mp4" codecs="avc1.64001f" bandwidth="993172" width="1280" height="720" sar="1:1">
++				<SegmentTemplate timescale="12800" initialization="init_v$RepresentationID$.mp4" media="segment_v$RepresentationID$_$Number$.m4s" startNumber="1">
++					<SegmentTimeline>
++						<S t="0" d="64000" r="2" />
++					</SegmentTimeline>
++				</SegmentTemplate>
++			</Representation>
++		</AdaptationSet>
++		<AdaptationSet id="1" contentType="audio" startWithSAP="1" segmentAlignment="true" bitstreamSwitching="true">
++			<Representation id="1" mimeType="audio/mp4" codecs="mp4a.40.2" bandwidth="64000" audioSamplingRate="48000">
++				<AudioChannelConfiguration schemeIdUri="urn:mpeg:dash:23003:3:audio_channel_configuration:2011" value="1" />
++				<SegmentTemplate timescale="48000" initialization="init_v$RepresentationID$.mp4" media="segment_v$RepresentationID$_$Number$.m4s" startNumber="1">
++					<SegmentTimeline>
++						<S t="0" d="236544" />
++						<S d="239616" />
++						<S d="240640" />
++						<S d="3200" />
++					</SegmentTimeline>
++				</SegmentTemplate>
++			</Representation>
++		</AdaptationSet>
++	</Period>
++</MPD>
+diff --git a/apps/core-mock/fixtures/dash/demo-clip-001/segment_v0_1.m4s b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v0_1.m4s
+new file mode 100644
+index 0000000..a243078
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v0_1.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/demo-clip-001/segment_v0_2.m4s b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v0_2.m4s
+new file mode 100644
+index 0000000..8c770ba
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v0_2.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/demo-clip-001/segment_v0_3.m4s b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v0_3.m4s
+new file mode 100644
+index 0000000..20fc7ba
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v0_3.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/demo-clip-001/segment_v1_1.m4s b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v1_1.m4s
+new file mode 100644
+index 0000000..ee34717
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v1_1.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/demo-clip-001/segment_v1_2.m4s b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v1_2.m4s
+new file mode 100644
+index 0000000..035b400
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v1_2.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/demo-clip-001/segment_v1_3.m4s b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v1_3.m4s
+new file mode 100644
+index 0000000..4fb5861
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v1_3.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/demo-clip-001/segment_v1_4.m4s b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v1_4.m4s
+new file mode 100644
+index 0000000..3ed823e
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/demo-clip-001/segment_v1_4.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/uploaded-001/init_v0.mp4 b/apps/core-mock/fixtures/dash/uploaded-001/init_v0.mp4
+new file mode 100644
+index 0000000..ddae9c9
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/uploaded-001/init_v0.mp4 differ
+diff --git a/apps/core-mock/fixtures/dash/uploaded-001/init_v1.mp4 b/apps/core-mock/fixtures/dash/uploaded-001/init_v1.mp4
+new file mode 100644
+index 0000000..98b339b
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/uploaded-001/init_v1.mp4 differ
+diff --git a/apps/core-mock/fixtures/dash/uploaded-001/manifest.mpd b/apps/core-mock/fixtures/dash/uploaded-001/manifest.mpd
+new file mode 100644
+index 0000000..6d0eeb0
+--- /dev/null
++++ b/apps/core-mock/fixtures/dash/uploaded-001/manifest.mpd
+@@ -0,0 +1,39 @@
++<?xml version="1.0" encoding="utf-8"?>
++<MPD xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++	xmlns="urn:mpeg:dash:schema:mpd:2011"
++	xmlns:xlink="http://www.w3.org/1999/xlink"
++	xsi:schemaLocation="urn:mpeg:DASH:schema:MPD:2011 http://standards.iso.org/ittf/PubliclyAvailableStandards/MPEG-DASH_schema_files/DASH-MPD.xsd"
++	profiles="urn:mpeg:dash:profile:isoff-live:2011"
++	type="static"
++	mediaPresentationDuration="PT15.0S"
++	maxSegmentDuration="PT5.0S"
++	minBufferTime="PT10.0S">
++	<ProgramInformation>
++	</ProgramInformation>
++	<ServiceDescription id="0">
++	</ServiceDescription>
++	<Period id="0" start="PT0.0S">
++		<AdaptationSet id="0" contentType="video" startWithSAP="1" segmentAlignment="true" bitstreamSwitching="true" frameRate="25/1" maxWidth="1280" maxHeight="720" par="16:9">
++			<Representation id="0" mimeType="video/mp4" codecs="avc1.64001f" bandwidth="87714" width="1280" height="720" sar="1:1">
++				<SegmentTemplate timescale="12800" initialization="init_v$RepresentationID$.mp4" media="segment_v$RepresentationID$_$Number$.m4s" startNumber="1">
++					<SegmentTimeline>
++						<S t="0" d="64000" r="2" />
++					</SegmentTimeline>
++				</SegmentTemplate>
++			</Representation>
++		</AdaptationSet>
++		<AdaptationSet id="1" contentType="audio" startWithSAP="1" segmentAlignment="true" bitstreamSwitching="true">
++			<Representation id="1" mimeType="audio/mp4" codecs="mp4a.40.2" bandwidth="96000" audioSamplingRate="48000">
++				<AudioChannelConfiguration schemeIdUri="urn:mpeg:dash:23003:3:audio_channel_configuration:2011" value="1" />
++				<SegmentTemplate timescale="48000" initialization="init_v$RepresentationID$.mp4" media="segment_v$RepresentationID$_$Number$.m4s" startNumber="1">
++					<SegmentTimeline>
++						<S t="0" d="236544" />
++						<S d="239616" />
++						<S d="240640" />
++						<S d="3200" />
++					</SegmentTimeline>
++				</SegmentTemplate>
++			</Representation>
++		</AdaptationSet>
++	</Period>
++</MPD>
+diff --git a/apps/core-mock/fixtures/dash/uploaded-001/segment_v0_1.m4s b/apps/core-mock/fixtures/dash/uploaded-001/segment_v0_1.m4s
+new file mode 100644
+index 0000000..65c70e8
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/uploaded-001/segment_v0_1.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/uploaded-001/segment_v0_2.m4s b/apps/core-mock/fixtures/dash/uploaded-001/segment_v0_2.m4s
+new file mode 100644
+index 0000000..5972708
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/uploaded-001/segment_v0_2.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/uploaded-001/segment_v0_3.m4s b/apps/core-mock/fixtures/dash/uploaded-001/segment_v0_3.m4s
+new file mode 100644
+index 0000000..a8eb698
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/uploaded-001/segment_v0_3.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/uploaded-001/segment_v1_1.m4s b/apps/core-mock/fixtures/dash/uploaded-001/segment_v1_1.m4s
+new file mode 100644
+index 0000000..d1bbf9d
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/uploaded-001/segment_v1_1.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/uploaded-001/segment_v1_2.m4s b/apps/core-mock/fixtures/dash/uploaded-001/segment_v1_2.m4s
+new file mode 100644
+index 0000000..f028d09
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/uploaded-001/segment_v1_2.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/uploaded-001/segment_v1_3.m4s b/apps/core-mock/fixtures/dash/uploaded-001/segment_v1_3.m4s
+new file mode 100644
+index 0000000..ee49504
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/uploaded-001/segment_v1_3.m4s differ
+diff --git a/apps/core-mock/fixtures/dash/uploaded-001/segment_v1_4.m4s b/apps/core-mock/fixtures/dash/uploaded-001/segment_v1_4.m4s
+new file mode 100644
+index 0000000..c633a09
+Binary files /dev/null and b/apps/core-mock/fixtures/dash/uploaded-001/segment_v1_4.m4s differ
+diff --git a/apps/core-mock/fixtures/images/img-001.jpg b/apps/core-mock/fixtures/images/img-001.jpg
+new file mode 100644
+index 0000000..244bf1a
+Binary files /dev/null and b/apps/core-mock/fixtures/images/img-001.jpg differ
+diff --git a/apps/core-mock/fixtures/images/img-002.jpg b/apps/core-mock/fixtures/images/img-002.jpg
+new file mode 100644
+index 0000000..056cbf5
+Binary files /dev/null and b/apps/core-mock/fixtures/images/img-002.jpg differ
+diff --git a/apps/core-mock/fixtures/images/img-003.jpg b/apps/core-mock/fixtures/images/img-003.jpg
+new file mode 100644
+index 0000000..4a9d378
+Binary files /dev/null and b/apps/core-mock/fixtures/images/img-003.jpg differ
+diff --git a/apps/core-mock/fixtures/images/screenshot-001.jpg b/apps/core-mock/fixtures/images/screenshot-001.jpg
+new file mode 100644
+index 0000000..ec63f6e
+Binary files /dev/null and b/apps/core-mock/fixtures/images/screenshot-001.jpg differ
+diff --git a/apps/core-mock/src/__tests__/storage-clip.test.ts b/apps/core-mock/src/__tests__/storage-clip.test.ts
+new file mode 100644
+index 0000000..15a5a5e
+--- /dev/null
++++ b/apps/core-mock/src/__tests__/storage-clip.test.ts
+@@ -0,0 +1,33 @@
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++import { buildCoreMock, type CoreMockHandle } from "../index.ts";
++
++describe("core-mock GET /private/storage/:id/clip", () => {
++	let handle: CoreMockHandle;
++
++	beforeEach(async () => {
++		handle = await buildCoreMock({ mockVodBaseUrl: "http://127.0.0.1:0" });
++	});
++
++	afterEach(async () => {
++		await handle.app.close();
++	});
++
++	it("returns mp4 bytes for the demo clip id", { timeout: 15_000 }, async () => {
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/demo-clip-001/clip",
++		});
++		expect(res.statusCode).toBe(200);
++		expect(res.headers["content-type"]).toBe("video/mp4");
++		expect(res.rawPayload.byteLength).toBeGreaterThan(0);
++		expect(res.rawPayload.subarray(4, 8).toString("ascii")).toBe("ftyp");
++	});
++
++	it("returns 404 for an unknown clip id", async () => {
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/unknown-id/clip",
++		});
++		expect(res.statusCode).toBe(404);
++	});
++});
+diff --git a/apps/core-mock/src/__tests__/storage-image.test.ts b/apps/core-mock/src/__tests__/storage-image.test.ts
+new file mode 100644
+index 0000000..67ecdc4
+--- /dev/null
++++ b/apps/core-mock/src/__tests__/storage-image.test.ts
+@@ -0,0 +1,45 @@
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++import { buildCoreMock, type CoreMockHandle } from "../index.ts";
++
++describe("core-mock GET /private/storage/:id/image", () => {
++	let handle: CoreMockHandle;
++
++	beforeEach(async () => {
++		handle = await buildCoreMock({ mockVodBaseUrl: "http://127.0.0.1:0" });
++	});
++
++	afterEach(async () => {
++		await handle.app.close();
++	});
++
++	it("returns image bytes with image/* Content-Type for a known fixture id", async () => {
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/img-001/image",
++		});
++		expect(res.statusCode).toBe(200);
++		const ct = res.headers["content-type"];
++		expect(typeof ct).toBe("string");
++		expect(ct as string).toMatch(/^image\//);
++		expect(res.rawPayload.byteLength).toBeGreaterThan(0);
++	});
++
++	it("returns 404 for an unknown fixture id", async () => {
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/does-not-exist/image",
++		});
++		expect(res.statusCode).toBe(404);
++	});
++
++	it("serves multiple distinct fixture ids", async () => {
++		const ids = ["img-001", "img-002", "img-003"];
++		for (const id of ids) {
++			const res = await handle.app.inject({
++				method: "GET",
++				url: `/private/storage/${id}/image`,
++			});
++			expect(res.statusCode, `id ${id}`).toBe(200);
++		}
++	});
++});
+diff --git a/apps/core-mock/src/__tests__/storage-mpd.test.ts b/apps/core-mock/src/__tests__/storage-mpd.test.ts
+new file mode 100644
+index 0000000..dcb3b52
+--- /dev/null
++++ b/apps/core-mock/src/__tests__/storage-mpd.test.ts
+@@ -0,0 +1,109 @@
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++import { buildCoreMock, type CoreMockHandle } from "../index.ts";
++
++describe("core-mock GET /private/storage/:id/mpd + segments", () => {
++	let handle: CoreMockHandle;
++
++	beforeEach(async () => {
++		handle = await buildCoreMock({ mockVodBaseUrl: "http://127.0.0.1:0" });
++	});
++
++	afterEach(async () => {
++		await handle.app.close();
++	});
++
++	it("returns MPD XML with application/dash+xml content-type for ClipVideo", async () => {
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/demo-clip-001/mpd",
++		});
++		expect(res.statusCode).toBe(200);
++		expect(res.headers["content-type"]).toBe("application/dash+xml");
++		expect(res.rawPayload.byteLength).toBeGreaterThan(0);
++		const xml = res.rawPayload.toString("utf8");
++		expect(xml).toContain("<MPD");
++		expect(xml).toContain("SegmentTemplate");
++		expect(xml).toContain("init_v$RepresentationID$.mp4");
++		expect(xml).toContain("segment_v$RepresentationID$_$Number$.m4s");
++	}, 60_000);
++
++	it("serves init_v0.mp4 segment bytes", async () => {
++		// Warm fixture
++		await handle.app.inject({ method: "GET", url: "/private/storage/demo-clip-001/mpd" });
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/demo-clip-001/init_v0.mp4",
++		});
++		expect(res.statusCode).toBe(200);
++		expect(res.headers["content-type"]).toBe("video/mp4");
++		expect(res.rawPayload.byteLength).toBeGreaterThan(0);
++	}, 60_000);
++
++	it("serves segment_v0_N.m4s segment bytes for first segment number", async () => {
++		const mpdRes = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/demo-clip-001/mpd",
++		});
++		const xml = mpdRes.rawPayload.toString("utf8");
++		// Extract first segment number from SegmentTimeline (startNumber attr)
++		const startNumberMatch = xml.match(/startNumber="(\d+)"/);
++		const startNumber = startNumberMatch ? Number(startNumberMatch[1]) : 1;
++		const res = await handle.app.inject({
++			method: "GET",
++			url: `/private/storage/demo-clip-001/segment_v0_${startNumber}.m4s`,
++		});
++		expect(res.statusCode).toBe(200);
++		expect(res.headers["content-type"]).toBe("video/iso.segment");
++		expect(res.rawPayload.byteLength).toBeGreaterThan(0);
++	}, 60_000);
++
++	it("returns 404 for unknown segment number", async () => {
++		await handle.app.inject({ method: "GET", url: "/private/storage/demo-clip-001/mpd" });
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/demo-clip-001/segment_v0_999999.m4s",
++		});
++		expect(res.statusCode).toBe(404);
++	}, 60_000);
++
++	it("returns 404 for image-type media on /mpd", async () => {
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/img-001/mpd",
++		});
++		expect(res.statusCode).toBe(404);
++	});
++
++	it("returns 404 for unknown video id on /mpd", async () => {
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/bogus/mpd",
++		});
++		expect(res.statusCode).toBe(404);
++	});
++
++	it("serves distinct MPD bytes for demo-clip-001 and uploaded-001", async () => {
++		const clip = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/demo-clip-001/mpd",
++		});
++		const uploaded = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/uploaded-001/mpd",
++		});
++		expect(clip.statusCode).toBe(200);
++		expect(uploaded.statusCode).toBe(200);
++		expect(clip.rawPayload.equals(uploaded.rawPayload)).toBe(false);
++	}, 60_000);
++
++	it("serves audio segments (init_v1.mp4) for uploaded-001", async () => {
++		await handle.app.inject({ method: "GET", url: "/private/storage/uploaded-001/mpd" });
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/storage/uploaded-001/init_v1.mp4",
++		});
++		expect(res.statusCode).toBe(200);
++		expect(res.headers["content-type"]).toBe("video/mp4");
++		expect(res.rawPayload.byteLength).toBeGreaterThan(0);
++	}, 60_000);
++});
+diff --git a/apps/core-mock/src/__tests__/videos-play.test.ts b/apps/core-mock/src/__tests__/videos-play.test.ts
+new file mode 100644
+index 0000000..1050f9a
+--- /dev/null
++++ b/apps/core-mock/src/__tests__/videos-play.test.ts
+@@ -0,0 +1,64 @@
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++import { buildCoreMock, type CoreMockHandle } from "../index.ts";
++
++describe("core-mock GET /private/videos/:id/play", () => {
++	let handle: CoreMockHandle;
++
++	beforeEach(async () => {
++		handle = await buildCoreMock({
++			mockVodBaseUrl: "http://127.0.0.1:0",
++			selfBaseUrl: "http://core-mock.test",
++		});
++	});
++
++	afterEach(async () => {
++		await handle.app.close();
++	});
++
++	it("returns { url, timeRanges } pointing at /storage/{id}/mpd for ClipVideo", async () => {
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/videos/demo-clip-001/play",
++		});
++		expect(res.statusCode).toBe(200);
++		const body = JSON.parse(res.body) as {
++			url: string;
++			timeRanges: number[][];
++			token?: string;
++		};
++		expect(body.url).toBe("http://core-mock.test/private/storage/demo-clip-001/mpd");
++		expect(body.timeRanges).toHaveLength(1);
++		expect(body.timeRanges[0]).toHaveLength(2);
++		expect(body.timeRanges[0][1]).toBeGreaterThan(body.timeRanges[0][0]);
++		expect(body.token).toBeUndefined();
++	});
++
++	it("returns the same shape for UploadedVideo", async () => {
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/videos/uploaded-001/play",
++		});
++		expect(res.statusCode).toBe(200);
++		const body = JSON.parse(res.body) as { url: string; timeRanges: number[][] };
++		expect(body.url).toBe("http://core-mock.test/private/storage/uploaded-001/mpd");
++		expect(body.timeRanges[0][1] - body.timeRanges[0][0]).toBe(15_000);
++	});
++
++	it("returns 404 for image-type media ids", async () => {
++		for (const id of ["img-001", "screenshot-001"]) {
++			const res = await handle.app.inject({
++				method: "GET",
++				url: `/private/videos/${id}/play`,
++			});
++			expect(res.statusCode, `id ${id}`).toBe(404);
++		}
++	});
++
++	it("returns 404 for unknown video id", async () => {
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/videos/bogus/play",
++		});
++		expect(res.statusCode).toBe(404);
++	});
++});
+diff --git a/apps/core-mock/src/__tests__/watch.test.ts b/apps/core-mock/src/__tests__/watch.test.ts
+new file mode 100644
+index 0000000..9b5b454
+--- /dev/null
++++ b/apps/core-mock/src/__tests__/watch.test.ts
+@@ -0,0 +1,45 @@
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++import { buildCoreMock, type CoreMockHandle } from "../index.ts";
++
++describe("core-mock GET /private/media/:id/watch", () => {
++	let handle: CoreMockHandle;
++
++	beforeEach(async () => {
++		handle = await buildCoreMock({ mockVodBaseUrl: "http://127.0.0.1:0" });
++	});
++
++	afterEach(async () => {
++		await handle.app.close();
++	});
++
++	const cases: Array<{ id: string; type: string }> = [
++		{ id: "img-001", type: "Image" },
++		{ id: "img-002", type: "Image" },
++		{ id: "img-003", type: "Image" },
++		{ id: "demo-clip-001", type: "ClipVideo" },
++		{ id: "uploaded-001", type: "UploadedVideo" },
++		{ id: "screenshot-001", type: "ScreenShotFromLive" },
++	];
++
++	for (const { id, type } of cases) {
++		it(`returns type=${type} + name for fixture id ${id}`, async () => {
++			const res = await handle.app.inject({
++				method: "GET",
++				url: `/private/media/${id}/watch`,
++			});
++			expect(res.statusCode).toBe(200);
++			const body = JSON.parse(res.body) as { type: string; name: string };
++			expect(body.type).toBe(type);
++			expect(typeof body.name).toBe("string");
++			expect(body.name.length).toBeGreaterThan(0);
++		});
++	}
++
++	it("returns 404 for unknown media id", async () => {
++		const res = await handle.app.inject({
++			method: "GET",
++			url: "/private/media/bogus/watch",
++		});
++		expect(res.statusCode).toBe(404);
++	});
++});
+diff --git a/apps/core-mock/src/fixtures/clip.ts b/apps/core-mock/src/fixtures/clip.ts
+new file mode 100644
+index 0000000..bea536c
+--- /dev/null
++++ b/apps/core-mock/src/fixtures/clip.ts
+@@ -0,0 +1,16 @@
++import { readFile } from "node:fs/promises";
++import { dirname, join } from "node:path";
++import { fileURLToPath } from "node:url";
++
++const fixtureRoot = join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/clip");
++let cached: Promise<Buffer> | undefined;
++
++export function getDemoClipMp4(): Promise<Buffer> {
++	if (!cached) {
++		cached = readFile(join(fixtureRoot, "demo-clip-001.mp4"));
++		cached.catch(() => {
++			cached = undefined;
++		});
++	}
++	return cached;
++}
+diff --git a/apps/core-mock/src/fixtures/dash.ts b/apps/core-mock/src/fixtures/dash.ts
+new file mode 100644
+index 0000000..8607c81
+--- /dev/null
++++ b/apps/core-mock/src/fixtures/dash.ts
+@@ -0,0 +1,43 @@
++import { readdir, readFile } from "node:fs/promises";
++import { dirname, join } from "node:path";
++import { fileURLToPath } from "node:url";
++
++export interface DashFixture {
++	mpd: Buffer;
++	inits: Map<string, Buffer>;
++	segments: Map<string, Buffer>;
++}
++
++const fixtureRoot = join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/dash");
++const cache = new Map<string, Promise<DashFixture>>();
++
++async function load(mediaId: string): Promise<DashFixture> {
++	const dir = join(fixtureRoot, mediaId);
++	const files = await readdir(dir);
++	const inits = new Map<string, Buffer>();
++	const segments = new Map<string, Buffer>();
++	let mpd: Buffer | undefined;
++	for (const file of files) {
++		const data = await readFile(join(dir, file));
++		if (file === "manifest.mpd") {
++			mpd = data;
++		} else if (/^init_v\d+\.mp4$/.test(file)) {
++			inits.set(file, data);
++		} else if (/^segment_v\d+_\d+\.m4s$/.test(file)) {
++			segments.set(file, data);
++		}
++	}
++	if (!mpd) throw new Error(`No manifest.mpd in fixture for ${mediaId}`);
++	if (inits.size === 0) throw new Error(`No init segments in fixture for ${mediaId}`);
++	if (segments.size === 0) throw new Error(`No media segments in fixture for ${mediaId}`);
++	return { mpd, inits, segments };
++}
++
++export function getDashFixture(mediaId: string): Promise<DashFixture> {
++	const cached = cache.get(mediaId);
++	if (cached) return cached;
++	const pending = load(mediaId);
++	cache.set(mediaId, pending);
++	pending.catch(() => cache.delete(mediaId));
++	return pending;
++}
+diff --git a/apps/core-mock/src/fixtures/images.ts b/apps/core-mock/src/fixtures/images.ts
+new file mode 100644
+index 0000000..4f1dec1
+--- /dev/null
++++ b/apps/core-mock/src/fixtures/images.ts
+@@ -0,0 +1,18 @@
++import { readFileSync } from "node:fs";
++import { dirname, join } from "node:path";
++import { fileURLToPath } from "node:url";
++
++export interface FixtureImage {
++	contentType: string;
++	body: Buffer;
++}
++
++const fixtureRoot = join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/images");
++const IDS = ["img-001", "img-002", "img-003", "screenshot-001"] as const;
++
++export const imageFixtures: Record<string, FixtureImage> = Object.fromEntries(
++	IDS.map((id) => [
++		id,
++		{ contentType: "image/jpeg", body: readFileSync(join(fixtureRoot, `${id}.jpg`)) },
++	]),
++);
+diff --git a/apps/core-mock/src/fixtures/media-registry.ts b/apps/core-mock/src/fixtures/media-registry.ts
+new file mode 100644
+index 0000000..f23b649
+--- /dev/null
++++ b/apps/core-mock/src/fixtures/media-registry.ts
+@@ -0,0 +1,31 @@
++export type StoredMediaType = "Image" | "ClipVideo" | "UploadedVideo" | "ScreenShotFromLive";
++
++export interface WatchEntry {
++	type: StoredMediaType;
++	name: string;
++}
++
++export interface VideoPlayEntry {
++	mediaCreatedAtMs: number;
++	durationMs: number;
++}
++
++// Hebrew display names mirror the iframe-demo preset buttons.
++export const watchRegistry: Record<string, WatchEntry> = {
++	"img-001": { type: "Image", name: "תמונת דמו 1" },
++	"img-002": { type: "Image", name: "תמונת דמו 2" },
++	"img-003": { type: "Image", name: "תמונת דמו 3" },
++	"demo-clip-001": { type: "ClipVideo", name: "קליפ דמו" },
++	"uploaded-001": { type: "UploadedVideo", name: "סרטון מוקלט" },
++	"screenshot-001": { type: "ScreenShotFromLive", name: "צילום מסך משידור" },
++};
++
++// Wall-clock anchors per video media id. Aligned with mock-vod's fixture window for parity.
++export const videoPlayRegistry: Record<string, VideoPlayEntry> = {
++	"demo-clip-001": { mediaCreatedAtMs: 1_700_000_000_000, durationMs: 15_000 },
++	"uploaded-001": { mediaCreatedAtMs: 1_700_000_100_000, durationMs: 15_000 },
++};
++
++export function isVideoType(type: StoredMediaType): boolean {
++	return type === "ClipVideo" || type === "UploadedVideo";
++}
+diff --git a/apps/core-mock/src/index.ts b/apps/core-mock/src/index.ts
+index df85726..b7249e4 100644
+--- a/apps/core-mock/src/index.ts
++++ b/apps/core-mock/src/index.ts
+@@ -2,6 +2,10 @@ import { randomBytes } from "node:crypto";
+ import cors from "@fastify/cors";
+ import Fastify, { type FastifyInstance } from "fastify";
+ import { ExportResultStore } from "./export-result-store.ts";
++import { getDemoClipMp4 } from "./fixtures/clip.ts";
++import { getDashFixture } from "./fixtures/dash.ts";
++import { imageFixtures } from "./fixtures/images.ts";
++import { isVideoType, videoPlayRegistry, watchRegistry } from "./fixtures/media-registry.ts";
+ 
+ const mockUser = {
+ 	displayName: "דניאל ריספלר",
+@@ -23,6 +27,8 @@ export interface BuildCoreMockOptions {
+ 	mockVodBaseUrl?: string;
+ 	tokenTtlMs?: number;
+ 	logger?: boolean;
++	/** Base URL the mock advertises in /videos/:id/play responses. Defaults to "http://127.0.0.1:8002". */
++	selfBaseUrl?: string;
+ }
+ 
+ export interface CoreMockHandle {
+@@ -49,6 +55,7 @@ async function probeFixtureWindow(mockVodBaseUrl: string): Promise<FixtureWindow
+ export async function buildCoreMock(opts: BuildCoreMockOptions = {}): Promise<CoreMockHandle> {
+ 	const mockVodBaseUrl = opts.mockVodBaseUrl ?? "http://127.0.0.1:5050";
+ 	const tokenTtlMs = opts.tokenTtlMs ?? 600_000;
++	const selfBaseUrl = opts.selfBaseUrl ?? "http://127.0.0.1:8002";
+ 
+ 	const app = Fastify({ logger: opts.logger ?? false });
+ 	await app.register(cors, { origin: true, credentials: true });
+@@ -60,6 +67,96 @@ export async function buildCoreMock(opts: BuildCoreMockOptions = {}): Promise<Co
+ 	app.get("/private/users/me", async () => mockUser);
+ 	app.get("/private/media/clip/managed-virtual-channels", async () => mockChannels);
+ 
++	app.get<{ Params: { id: string } }>("/private/storage/:id/image", async (req, reply) => {
++		const fixture = imageFixtures[req.params.id];
++		if (!fixture) {
++			return reply.status(404).send({ error: "Unknown image id" });
++		}
++		return reply
++			.header("Content-Type", fixture.contentType)
++			.header("Cache-Control", "public, max-age=300")
++			.send(fixture.body);
++	});
++
++	app.get<{ Params: { id: string } }>("/private/storage/:id/clip", async (req, reply) => {
++		if (req.params.id !== "demo-clip-001") {
++			return reply.status(404).send({ error: "Unknown clip id" });
++		}
++		const body = await getDemoClipMp4();
++		return reply
++			.header("Content-Type", "video/mp4")
++			.header("Cache-Control", "public, max-age=300")
++			.send(body);
++	});
++
++	app.get<{ Params: { id: string } }>("/private/media/:id/watch", async (req, reply) => {
++		const entry = watchRegistry[req.params.id];
++		if (!entry) {
++			return reply.status(404).send({ error: "Unknown media id" });
++		}
++		return entry;
++	});
++
++	app.get<{ Params: { id: string } }>("/private/videos/:id/play", async (req, reply) => {
++		const watch = watchRegistry[req.params.id];
++		if (!watch || !isVideoType(watch.type)) {
++			return reply.status(404).send({ error: "Unknown video id" });
++		}
++		const playEntry = videoPlayRegistry[req.params.id];
++		if (!playEntry) {
++			return reply.status(404).send({ error: "Unknown video id" });
++		}
++		return {
++			url: `${selfBaseUrl}/private/storage/${encodeURIComponent(req.params.id)}/mpd`,
++			timeRanges: [[playEntry.mediaCreatedAtMs, playEntry.mediaCreatedAtMs + playEntry.durationMs]],
++		};
++	});
++
++	app.get<{ Params: { id: string } }>("/private/storage/:id/mpd", async (req, reply) => {
++		const watch = watchRegistry[req.params.id];
++		if (!watch || !isVideoType(watch.type)) {
++			return reply.status(404).send({ error: "Unknown video id" });
++		}
++		const fixture = await getDashFixture(req.params.id);
++		return reply
++			.header("Content-Type", "application/dash+xml")
++			.header("Cache-Control", "no-store")
++			.send(fixture.mpd);
++	});
++
++	app.get<{ Params: { id: string; filename: string } }>(
++		"/private/storage/:id/:filename",
++		async (req, reply) => {
++			const { id, filename } = req.params;
++			const watch = watchRegistry[id];
++			if (!watch || !isVideoType(watch.type)) {
++				return reply.status(404).send({ error: "Unknown video id" });
++			}
++			const fixture = await getDashFixture(id);
++			if (/^init_v\d+\.mp4$/.test(filename)) {
++				const init = fixture.inits.get(filename);
++				if (!init) {
++					return reply.status(404).send({ error: "Unknown init segment" });
++				}
++				return reply
++					.header("Content-Type", "video/mp4")
++					.header("Cache-Control", "public, max-age=300")
++					.send(init);
++			}
++			if (/^segment_v\d+_\d+\.m4s$/.test(filename)) {
++				const seg = fixture.segments.get(filename);
++				if (!seg) {
++					return reply.status(404).send({ error: "Unknown segment" });
++				}
++				return reply
++					.header("Content-Type", "video/iso.segment")
++					.header("Cache-Control", "public, max-age=300")
++					.send(seg);
++			}
++			return reply.status(404).send({ error: "Unknown storage path" });
++		},
++	);
++
+ 	app.get<{
+ 		Params: { channelId: string };
+ 		Querystring: { start?: string; end?: string };
+diff --git a/apps/frontend/.env b/apps/frontend/.env
+index 7ef74cc..6010c8d 100644
+--- a/apps/frontend/.env
++++ b/apps/frontend/.env
+@@ -1,4 +1,4 @@
+ VITE_EDITOR_PARENT_ORIGINS=http://localhost:8080
+-VITE_CORE_EXTENSION=:8002/private
++VITE_CORE_EXTENSION=/private
+ VITE_SERVER_EXTENSION=
+ VITE_PUBLIC_PATH=/
+diff --git a/apps/frontend/.env.preprod b/apps/frontend/.env.preprod
+index 41e4283..350963a 100644
+--- a/apps/frontend/.env.preprod
++++ b/apps/frontend/.env.preprod
+@@ -1,4 +1,4 @@
+ VITE_EDITOR_PARENT_ORIGINS=https://iframe-demo.preprod.yourcompany.com
+-VITE_CORE_EXTENSION=/api/media/
++VITE_CORE_EXTENSION=/api/media
+ VITE_SERVER_EXTENSION=/api/video_editor/server
+ VITE_PUBLIC_PATH=/api/video_editor/frontend/
+diff --git a/apps/frontend/.env.production b/apps/frontend/.env.production
+index 8f2d172..156b4f7 100644
+--- a/apps/frontend/.env.production
++++ b/apps/frontend/.env.production
+@@ -1,4 +1,4 @@
+ VITE_EDITOR_PARENT_ORIGINS=https://iframe-demo.yourcompany.com
+-VITE_CORE_EXTENSION=/api/media/private
++VITE_CORE_EXTENSION=/api/media
+ VITE_SERVER_EXTENSION=/api/video_editor/server
+ VITE_PUBLIC_PATH=/api/video_editor/frontend/
+diff --git a/apps/frontend/CLAUDE.md b/apps/frontend/CLAUDE.md
+index 5aa40a4..a6d48f7 100644
+--- a/apps/frontend/CLAUDE.md
++++ b/apps/frontend/CLAUDE.md
+@@ -86,9 +86,19 @@ There is no global scene store outside this folder.
+ `useEditorPostMessage` hook (in `src/features/editor/external-preview/use-editor-post-message.ts`) listens for `window.postMessage` from parent. Uses `@video-editor/contract/iframe/from-parent` (parse incoming) and `@video-editor/contract/iframe/to-parent` (build responses) for typed schemas.
+ 
+ Supported inbound messages:
+-- `EDITOR_ADD_PREVIEW_ITEM` — adds video/audio track at end of timeline (`recording-range`, `media`, `audio-range` payloads)
++- `EDITOR_ADD_PREVIEW_ITEM` — adds a recording-range or audio-range track at end of timeline (`recording-range`, `audio-range` payloads only — image/media kinds removed; use `EDITOR_ADD_MEDIA` instead)
++- `EDITOR_ADD_MEDIA` — id-only intake: `{ mediaId }`. The editor calls Core `GET /private/media/{id}/watch` to resolve `{ type, name }` and branches:
++  - `Image` / `ScreenShotFromLive` → builds `${VITE_CORE_EXTENSION}/storage/{id}/image`, dispatches `ADD_IMAGE` with default 5000 ms duration
++  - `ClipVideo` / `UploadedVideo` → calls `resolvePreviewSource({ type: "media-id", mediaId })` → backend returns playlist URL + duration + dimensions, dispatches `ADD_VIDEO`
++  - Core 404 → `EDITOR_PREVIEW_ITEM_REJECTED { mediaId, reason: "media not found" }`
++  - 5xx / network → `EDITOR_PREVIEW_ITEM_REJECTED { mediaId, reason: "core unavailable" }`
++  - Ack is **async** (Core round-trip) — parents must not assume synchronous ack on stored media
+ - `EDITOR_CLEAR_PROJECT` — wipes all tracks, resets duration
+ 
++Two correlation patterns coexist:
++- `EDITOR_ADD_PREVIEW_ITEM` / `EDITOR_CLEAR_PROJECT` use `requestId` (optional, response cache de-duplicates by it)
++- `EDITOR_ADD_MEDIA` echoes `mediaId` on response. No `requestId`, no de-duplication — two adds with same id are processed twice.
++
+ Outbound:
+ - `EDITOR_READY` — on init
+ - `EDITOR_PREVIEW_ITEM_ADDED` — ack
+@@ -108,7 +118,7 @@ Configured in `vite.config.ts`. Three proxy groups:
+ |---|---|---|
+ | `^/(render\|uploads\|upload\|cleanup\|edit-video)` | `http://localhost:4001` (server) | `VITE_API_URL` |
+ | `^/editor/(preview-source\|segment\|demo-assets\|export)` | `http://localhost:4001` (server) | `VITE_API_URL` |
+-| `^/private/(media\|users\|channels)` | `http://localhost:8002` (core-mock) | `VITE_CORE_URL` |
++| `^/private/(media\|users\|channels\|storage\|videos)` | `http://localhost:8002` (core-mock) | `VITE_CORE_URL` |
+ 
+ Build `base` is `VITE_PUBLIC_PATH` (defaults to `/`). Build target is `chrome113`. Manual chunks split vendor bundles (framer, radix, designcombo, remotion, react).
+ 
+@@ -161,7 +171,7 @@ All optional. None required in dev.
+ |---|---|---|
+ | `VITE_EDITOR_PARENT_ORIGINS` | `useEditorPostMessage` | Comma-separated allowed origins for iframe postMessage |
+ | `VITE_SERVER_EXTENSION` | `src/utils/fetch-server.ts` | Path prefix for server API calls |
+-| `VITE_CORE_EXTENSION` | `src/utils/fetch-core.ts` | Path prefix for core-service API calls |
++| `VITE_CORE_EXTENSION` | `src/utils/fetch-core.ts` | Path prefix for core-service API calls. Must be a leading-slash path with no trailing slash (e.g. `/private` in dev to match the vite proxy, `/api/media` in deployed envs where the gateway mounts the core `/private` root). |
+ | `VITE_API_URL` | `vite.config.ts` (dev proxy) | Override for server proxy target |
+ | `VITE_CORE_URL` | `vite.config.ts` (dev proxy) | Override for core-service proxy target |
+ | `VITE_PUBLIC_PATH` | `vite.config.ts` (build) | Sets Vite `base` for non-root deploys |
+diff --git a/apps/frontend/src/features/editor/editor.tsx b/apps/frontend/src/features/editor/editor.tsx
+index 13b2a94..ae0101e 100644
+--- a/apps/frontend/src/features/editor/editor.tsx
++++ b/apps/frontend/src/features/editor/editor.tsx
+@@ -257,7 +257,7 @@ const SceneContainer = memo(({ sceneRef, stateManager, trackItem }: SceneContain
+ });
+ 
+ const Editor = ({ tempId, id }: { tempId?: string; id?: string }) => {
+-	const [projectName, setProjectName] = useState<string>("RoniCut");
++	const [projectName, setProjectName] = useState<string>("Ztube Editor");
+ 	const sceneRef = useRef<SceneRef>(null);
+ 	const { timeline, playerRef } = useEditorRefs(
+ 		useShallow((s) => ({ timeline: s.timeline, playerRef: s.playerRef })),
+@@ -329,9 +329,9 @@ const Editor = ({ tempId, id }: { tempId?: string; id?: string }) => {
+ 	}, []);
+ 
+ 	useEffect(() => {
+-		document.title = projectName ? `${projectName} | RoniCut` : "RoniCut";
++		document.title = projectName || "Ztube Editor";
+ 		return () => {
+-			document.title = "RoniCut";
++			document.title = "Ztube Editor";
+ 		};
+ 	}, [projectName]);
+ 
+diff --git a/apps/frontend/src/features/editor/external-preview/__tests__/handle-parent-message.test.ts b/apps/frontend/src/features/editor/external-preview/__tests__/handle-parent-message.test.ts
+index 5420eed..5dc2c70 100644
+--- a/apps/frontend/src/features/editor/external-preview/__tests__/handle-parent-message.test.ts
++++ b/apps/frontend/src/features/editor/external-preview/__tests__/handle-parent-message.test.ts
+@@ -16,25 +16,37 @@ interface Harness {
+ 	deps: ParentMessageDeps;
+ 	posts: CapturedPost[];
+ 	addPreviewItem: ReturnType<typeof vi.fn>;
++	addStoredMedia: ReturnType<typeof vi.fn>;
+ 	clearProject: ReturnType<typeof vi.fn>;
+ 	cache: Map<string, ResponseCacheEntry>;
+ }
+ 
++const validRecordingPayload = {
++	kind: "recording-range" as const,
++	channelId: "ch-1",
++	startTimeMs: 1000,
++	endTimeMs: 4000,
++	durationMs: 3000,
++	playback: { kind: "hls" as const, src: "https://example.com/p.m3u8" },
++};
++
+ const makeHarness = (overrides: Partial<ParentMessageDeps> = {}): Harness => {
+ 	const posts: CapturedPost[] = [];
+ 	const cache = new Map<string, ResponseCacheEntry>();
+ 	const addPreviewItem = vi.fn(async () => "item-xyz");
++	const addStoredMedia = vi.fn(async () => "stored-item-abc");
+ 	const clearProject = vi.fn();
+ 	const deps: ParentMessageDeps = {
+ 		allowedOrigins: new Set(["https://parent.example"]),
+ 		responseCache: cache,
+ 		maxCacheSize: 100,
+ 		addPreviewItem,
++		addStoredMedia,
+ 		clearProject,
+ 		postResponse: (source, targetOrigin, message) => posts.push({ source, targetOrigin, message }),
+ 		...overrides,
+ 	};
+-	return { deps, posts, addPreviewItem, clearProject, cache };
++	return { deps, posts, addPreviewItem, addStoredMedia, clearProject, cache };
+ };
+ 
+ const makeEvent = (data: unknown, origin = "https://parent.example") => ({
+@@ -57,6 +69,7 @@ describe("handleParentMessage", () => {
+ 		);
+ 		expect(harness.posts).toEqual([]);
+ 		expect(harness.addPreviewItem).not.toHaveBeenCalled();
++		expect(harness.addStoredMedia).not.toHaveBeenCalled();
+ 		expect(harness.clearProject).not.toHaveBeenCalled();
+ 	});
+ 
+@@ -72,26 +85,27 @@ describe("handleParentMessage", () => {
+ 		expect(rejected.reason).toBeTruthy();
+ 	});
+ 
+-	it("invokes addPreviewItem and replies with EDITOR_PREVIEW_ITEM_ADDED on valid payload", async () => {
++	it("invokes addPreviewItem and replies with EDITOR_PREVIEW_ITEM_ADDED on valid recording payload", async () => {
+ 		await handleParentMessage(
+ 			harness.deps,
+ 			makeEvent({
+ 				type: "EDITOR_ADD_PREVIEW_ITEM",
+ 				requestId: "r2",
+-				payload: {
+-					kind: "media",
+-					mediaId: "m-1",
+-					playback: { kind: "mp4", src: "https://example.com/v.mp4" },
+-				},
++				payload: validRecordingPayload,
+ 			}),
+ 		);
+ 		expect(harness.addPreviewItem).toHaveBeenCalledTimes(1);
+ 		expect(harness.posts).toHaveLength(1);
+-		expect(harness.posts[0].message).toEqual({
+-			type: "EDITOR_PREVIEW_ITEM_ADDED",
+-			requestId: "r2",
+-			itemId: "item-xyz",
+-		});
++		const msg = harness.posts[0].message as {
++			type: string;
++			requestId?: string;
++			mediaId?: string;
++			itemId: string;
++		};
++		expect(msg.type).toBe("EDITOR_PREVIEW_ITEM_ADDED");
++		expect(msg.requestId).toBe("r2");
++		expect(msg.itemId).toBe("item-xyz");
++		expect(msg.mediaId).toBeUndefined();
+ 	});
+ 
+ 	it("invokes clearProject and replies with EDITOR_PROJECT_CLEARED on EDITOR_CLEAR_PROJECT", async () => {
+@@ -107,7 +121,7 @@ describe("handleParentMessage", () => {
+ 		});
+ 	});
+ 
+-	it("replays the cached response when requestId is already known", async () => {
++	it("replays the cached response when requestId is already known (EDITOR_ADD_PREVIEW_ITEM)", async () => {
+ 		const cached: ResponseCacheEntry = {
+ 			type: "EDITOR_PREVIEW_ITEM_ADDED",
+ 			requestId: "dup",
+@@ -120,11 +134,7 @@ describe("handleParentMessage", () => {
+ 			makeEvent({
+ 				type: "EDITOR_ADD_PREVIEW_ITEM",
+ 				requestId: "dup",
+-				payload: {
+-					kind: "media",
+-					mediaId: "m-1",
+-					playback: { kind: "mp4", src: "https://example.com/v.mp4" },
+-				},
++				payload: validRecordingPayload,
+ 			}),
+ 		);
+ 
+@@ -155,11 +165,7 @@ describe("handleParentMessage", () => {
+ 			makeEvent({
+ 				type: "EDITOR_ADD_PREVIEW_ITEM",
+ 				requestId: "r-fail",
+-				payload: {
+-					kind: "media",
+-					mediaId: "m-1",
+-					playback: { kind: "mp4", src: "https://example.com/v.mp4" },
+-				},
++				payload: validRecordingPayload,
+ 			}),
+ 		);
+ 		expect(harness.posts).toHaveLength(1);
+@@ -168,4 +174,67 @@ describe("handleParentMessage", () => {
+ 		expect(msg.reason).toBe("upstream blew up");
+ 		expect(msg.requestId).toBe("r-fail");
+ 	});
++
++	describe("EDITOR_ADD_MEDIA", () => {
++		it("invokes addStoredMedia and replies with EDITOR_PREVIEW_ITEM_ADDED echoing mediaId", async () => {
++			await handleParentMessage(
++				harness.deps,
++				makeEvent({ type: "EDITOR_ADD_MEDIA", mediaId: "img-001" }),
++			);
++			expect(harness.addStoredMedia).toHaveBeenCalledTimes(1);
++			expect(harness.addStoredMedia).toHaveBeenCalledWith("img-001");
++			expect(harness.posts).toHaveLength(1);
++			const msg = harness.posts[0].message as {
++				type: string;
++				mediaId?: string;
++				itemId: string;
++				requestId?: string;
++			};
++			expect(msg.type).toBe("EDITOR_PREVIEW_ITEM_ADDED");
++			expect(msg.mediaId).toBe("img-001");
++			expect(msg.itemId).toBe("stored-item-abc");
++			expect(msg.requestId).toBeUndefined();
++		});
++
++		it("emits EDITOR_PREVIEW_ITEM_REJECTED with echoed mediaId + 'media not found' on StoredMediaNotFoundError-shape", async () => {
++			harness.addStoredMedia.mockRejectedValueOnce(new Error("media not found"));
++			await handleParentMessage(
++				harness.deps,
++				makeEvent({ type: "EDITOR_ADD_MEDIA", mediaId: "bogus" }),
++			);
++			expect(harness.posts).toHaveLength(1);
++			const msg = harness.posts[0].message as {
++				type: string;
++				mediaId?: string;
++				reason: string;
++			};
++			expect(msg.type).toBe("EDITOR_PREVIEW_ITEM_REJECTED");
++			expect(msg.mediaId).toBe("bogus");
++			expect(msg.reason).toBe("media not found");
++		});
++
++		it("emits EDITOR_PREVIEW_ITEM_REJECTED with 'core unavailable' on infra error", async () => {
++			harness.addStoredMedia.mockRejectedValueOnce(new Error("core unavailable"));
++			await handleParentMessage(
++				harness.deps,
++				makeEvent({ type: "EDITOR_ADD_MEDIA", mediaId: "x" }),
++			);
++			const msg = harness.posts[0].message as { reason: string; mediaId?: string };
++			expect(msg.reason).toBe("core unavailable");
++			expect(msg.mediaId).toBe("x");
++		});
++
++		it("does not cache by requestId — two adds with same mediaId both process", async () => {
++			await handleParentMessage(
++				harness.deps,
++				makeEvent({ type: "EDITOR_ADD_MEDIA", mediaId: "img-001" }),
++			);
++			await handleParentMessage(
++				harness.deps,
++				makeEvent({ type: "EDITOR_ADD_MEDIA", mediaId: "img-001" }),
++			);
++			expect(harness.addStoredMedia).toHaveBeenCalledTimes(2);
++			expect(harness.posts).toHaveLength(2);
++		});
++	});
+ });
+diff --git a/apps/frontend/src/features/editor/external-preview/__tests__/payload-intake.test.ts b/apps/frontend/src/features/editor/external-preview/__tests__/payload-intake.test.ts
+index 1037ae3..f95c854 100644
+--- a/apps/frontend/src/features/editor/external-preview/__tests__/payload-intake.test.ts
++++ b/apps/frontend/src/features/editor/external-preview/__tests__/payload-intake.test.ts
+@@ -1,4 +1,6 @@
++import { dispatch } from "@designcombo/events";
+ import type StateManager from "@designcombo/state";
++import { ADD_IMAGE, ADD_VIDEO } from "@designcombo/state";
+ import type { ITrackItem } from "@designcombo/types";
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ 
+@@ -10,12 +12,17 @@ vi.mock("../preview-source-api", () => ({
+ 
+ import {
+ 	addPreviewItemToEditor,
++	addStoredMediaToEditor,
+ 	buildExternalMetadata,
+ 	buildFallbackTrackItem,
++	CoreUnavailableError,
+ 	getDurationFromItem,
++	StoredMediaNotFoundError,
+ } from "../payload-intake";
+ import { resolvePreviewSource } from "../preview-source-api";
+ 
++const dispatchMock = dispatch as unknown as ReturnType<typeof vi.fn>;
++
+ const makeStateManager = (): StateManager => {
+ 	let state = {
+ 		trackItemsMap: {} as Record<string, unknown>,
+@@ -56,7 +63,7 @@ describe("getDurationFromItem", () => {
+ });
+ 
+ describe("buildExternalMetadata", () => {
+-	it("maps recording-range payload to hls metadata", () => {
++	it("maps recording-range payload to externalKind=recording-range metadata", () => {
+ 		const result = buildExternalMetadata({
+ 			kind: "recording-range",
+ 			channelId: "ch-1",
+@@ -65,7 +72,6 @@ describe("buildExternalMetadata", () => {
+ 			durationMs: 3000,
+ 		});
+ 		expect(result).toEqual({
+-			sourceKind: "hls",
+ 			externalKind: "recording-range",
+ 			channelId: "ch-1",
+ 			sourceStartTimeMs: 1000,
+@@ -73,20 +79,7 @@ describe("buildExternalMetadata", () => {
+ 		});
+ 	});
+ 
+-	it("maps media payload with mp4 playback", () => {
+-		const result = buildExternalMetadata({
+-			kind: "media",
+-			mediaId: "m-1",
+-			playback: { kind: "mp4", src: "https://example.com/video.mp4" },
+-		});
+-		expect(result).toEqual({
+-			sourceKind: "mp4",
+-			externalKind: "media",
+-			mediaId: "m-1",
+-		});
+-	});
+-
+-	it("maps audio-range payload", () => {
++	it("maps audio-range payload to externalKind=audio-range metadata", () => {
+ 		const result = buildExternalMetadata({
+ 			kind: "audio-range",
+ 			audioId: "a-1",
+@@ -96,7 +89,6 @@ describe("buildExternalMetadata", () => {
+ 			endTimeMs: 2500,
+ 		});
+ 		expect(result).toEqual({
+-			sourceKind: "audio",
+ 			externalKind: "audio-range",
+ 			audioId: "a-1",
+ 			sourceStartTimeMs: 500,
+@@ -107,7 +99,6 @@ describe("buildExternalMetadata", () => {
+ 
+ describe("buildFallbackTrackItem", () => {
+ 	const metadata = {
+-		sourceKind: "hls" as const,
+ 		externalKind: "recording-range" as const,
+ 		channelId: "ch-1",
+ 		sourceStartTimeMs: 1000,
+@@ -138,7 +129,6 @@ describe("buildFallbackTrackItem", () => {
+ 
+ 	it("builds an audio track item for audio-range", () => {
+ 		const audioMetadata = {
+-			sourceKind: "audio" as const,
+ 			externalKind: "audio-range" as const,
+ 			audioId: "a-1",
+ 		};
+@@ -186,19 +176,18 @@ describe("addPreviewItemToEditor recording-range integration", () => {
+ 
+ 	beforeEach(() => {
+ 		resolveSpy.mockReset();
++		dispatchMock.mockReset();
+ 	});
+ 
+ 	afterEach(() => {
+ 		resolveSpy.mockReset();
++		dispatchMock.mockReset();
+ 	});
+ 
+-	it("calls resolvePreviewSource with exactly (channelId, startTimeMs, endTimeMs) when playback.src absent", async () => {
++	it("calls resolvePreviewSource with {type: 'channel-range', channelId, startTimeMs, endTimeMs} when playback.src absent", async () => {
+ 		resolveSpy.mockResolvedValueOnce({
+ 			type: "hls",
+ 			playlistUrl: "https://example.com/preview.m3u8",
+-			channelId: "ch-7",
+-			requestedStartMs: 1000,
+-			requestedEndMs: 4000,
+ 			durationMs: 3000,
+ 			sourceOffsetMs: 500,
+ 			width: 1280,
+@@ -215,7 +204,12 @@ describe("addPreviewItemToEditor recording-range integration", () => {
+ 		});
+ 
+ 		expect(resolveSpy).toHaveBeenCalledTimes(1);
+-		expect(resolveSpy.mock.calls[0]).toEqual(["ch-7", 1000, 4000]);
++		expect(resolveSpy.mock.calls[0][0]).toEqual({
++			type: "channel-range",
++			channelId: "ch-7",
++			startTimeMs: 1000,
++			endTimeMs: 4000,
++		});
+ 	});
+ 
+ 	it("does not call resolvePreviewSource when payload.playback.src is present (fast path)", async () => {
+@@ -232,3 +226,119 @@ describe("addPreviewItemToEditor recording-range integration", () => {
+ 		expect(resolveSpy).not.toHaveBeenCalled();
+ 	});
+ });
++
++describe("addStoredMediaToEditor", () => {
++	const resolveSpy = resolvePreviewSource as unknown as ReturnType<typeof vi.fn>;
++	let fetchSpy: ReturnType<typeof vi.fn>;
++
++	beforeEach(() => {
++		dispatchMock.mockReset();
++		resolveSpy.mockReset();
++		fetchSpy = vi.fn();
++		vi.stubGlobal("fetch", fetchSpy);
++	});
++
++	afterEach(() => {
++		vi.unstubAllGlobals();
++	});
++
++	const watchResponse = (type: string, name = "demo") =>
++		new Response(JSON.stringify({ type, name }), {
++			status: 200,
++			headers: { "content-type": "application/json" },
++		});
++
++	it("dispatches ADD_IMAGE for Image type with /storage/{id}/image src + default 5000ms", async () => {
++		fetchSpy.mockResolvedValueOnce(watchResponse("Image", "logo"));
++		const sm = makeStateManager();
++		const itemId = await addStoredMediaToEditor(sm, "img-001");
++
++		expect(itemId).toBe("generated-id");
++		expect(dispatchMock).toHaveBeenCalledTimes(1);
++		const [evtType, evtArg] = dispatchMock.mock.calls[0];
++		expect(evtType).toBe(ADD_IMAGE);
++		expect(evtArg.payload.type).toBe("image");
++		expect(evtArg.payload.details.src).toMatch(/\/storage\/img-001\/image$/);
++		expect(evtArg.payload.display).toEqual({ from: 0, to: 5000 });
++		expect(evtArg.payload.metadata.externalKind).toBe("stored-media");
++		expect(evtArg.payload.metadata.storedMediaType).toBe("Image");
++		expect(evtArg.payload.metadata.mediaId).toBe("img-001");
++		expect(evtArg.payload.metadata.displayName).toBe("logo");
++	});
++
++	it("dispatches ADD_IMAGE for ScreenShotFromLive type", async () => {
++		fetchSpy.mockResolvedValueOnce(watchResponse("ScreenShotFromLive", "snap"));
++		const sm = makeStateManager();
++		await addStoredMediaToEditor(sm, "shot-1");
++		const [evtType, evtArg] = dispatchMock.mock.calls[0];
++		expect(evtType).toBe(ADD_IMAGE);
++		expect(evtArg.payload.metadata.storedMediaType).toBe("ScreenShotFromLive");
++	});
++
++	it("dispatches ADD_VIDEO for ClipVideo type via resolvePreviewSource({type: 'media-id'})", async () => {
++		fetchSpy.mockResolvedValueOnce(watchResponse("ClipVideo", "clip"));
++		resolveSpy.mockResolvedValueOnce({
++			type: "hls",
++			playlistUrl: "https://example.com/clip.m3u8",
++			durationMs: 60_000,
++			sourceOffsetMs: 0,
++			width: 1280,
++			height: 1024,
++			mediaCreatedAtMs: 1_700_000_000_000,
++		});
++		const sm = makeStateManager();
++		await addStoredMediaToEditor(sm, "clip-001");
++
++		expect(resolveSpy).toHaveBeenCalledTimes(1);
++		expect(resolveSpy.mock.calls[0][0]).toEqual({ type: "media-id", mediaId: "clip-001" });
++
++		const [evtType, evtArg] = dispatchMock.mock.calls[0];
++		expect(evtType).toBe(ADD_VIDEO);
++		expect(evtArg.payload.type).toBe("video");
++		expect(evtArg.payload.details.src).toBe("https://example.com/clip.m3u8");
++		expect(evtArg.payload.details.width).toBe(1280);
++		expect(evtArg.payload.details.height).toBe(1024);
++		expect(evtArg.payload.display).toEqual({ from: 0, to: 60_000 });
++		expect(evtArg.payload.trim).toEqual({ from: 0, to: 60_000 });
++		expect(evtArg.payload.metadata.storedMediaType).toBe("ClipVideo");
++		expect(evtArg.payload.metadata.mediaId).toBe("clip-001");
++	});
++
++	it("dispatches ADD_VIDEO for UploadedVideo type", async () => {
++		fetchSpy.mockResolvedValueOnce(watchResponse("UploadedVideo", "uploaded"));
++		resolveSpy.mockResolvedValueOnce({
++			type: "hls",
++			playlistUrl: "https://example.com/up.m3u8",
++			durationMs: 30_000,
++			sourceOffsetMs: 0,
++			width: 640,
++			height: 480,
++		});
++		const sm = makeStateManager();
++		await addStoredMediaToEditor(sm, "up-1");
++		const [evtType, evtArg] = dispatchMock.mock.calls[0];
++		expect(evtType).toBe(ADD_VIDEO);
++		expect(evtArg.payload.metadata.storedMediaType).toBe("UploadedVideo");
++	});
++
++	it("throws StoredMediaNotFoundError on 404", async () => {
++		fetchSpy.mockResolvedValueOnce(new Response("", { status: 404 }));
++		const sm = makeStateManager();
++		await expect(addStoredMediaToEditor(sm, "bogus")).rejects.toBeInstanceOf(
++			StoredMediaNotFoundError,
++		);
++		expect(dispatchMock).not.toHaveBeenCalled();
++	});
++
++	it("throws CoreUnavailableError on 500", async () => {
++		fetchSpy.mockResolvedValueOnce(new Response("", { status: 500 }));
++		const sm = makeStateManager();
++		await expect(addStoredMediaToEditor(sm, "x")).rejects.toBeInstanceOf(CoreUnavailableError);
++	});
++
++	it("throws CoreUnavailableError on network failure", async () => {
++		fetchSpy.mockRejectedValueOnce(new Error("network down"));
++		const sm = makeStateManager();
++		await expect(addStoredMediaToEditor(sm, "x")).rejects.toBeInstanceOf(CoreUnavailableError);
++	});
++});
+diff --git a/apps/frontend/src/features/editor/external-preview/__tests__/preview-source-api.test.ts b/apps/frontend/src/features/editor/external-preview/__tests__/preview-source-api.test.ts
+index 5655369..f8fc1b1 100644
+--- a/apps/frontend/src/features/editor/external-preview/__tests__/preview-source-api.test.ts
++++ b/apps/frontend/src/features/editor/external-preview/__tests__/preview-source-api.test.ts
+@@ -17,9 +17,6 @@ describe("resolvePreviewSource", () => {
+ 				JSON.stringify({
+ 					type: "hls",
+ 					playlistUrl: "x",
+-					channelId: "ch",
+-					requestedStartMs: 0,
+-					requestedEndMs: 1000,
+ 					durationMs: 1000,
+ 					sourceOffsetMs: 0,
+ 					width: 1920,
+@@ -29,7 +26,12 @@ describe("resolvePreviewSource", () => {
+ 			),
+ 		);
+ 
+-		await resolvePreviewSource("ch", 0, 1000);
++		await resolvePreviewSource({
++			type: "channel-range",
++			channelId: "ch",
++			startTimeMs: 0,
++			endTimeMs: 1000,
++		});
+ 
+ 		expect(fetchSpy).toHaveBeenCalledTimes(1);
+ 		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+@@ -42,10 +44,44 @@ describe("resolvePreviewSource", () => {
+ 		});
+ 	});
+ 
++	it("POSTs JSON to /editor/preview-source with media-id body", async () => {
++		const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
++		fetchSpy.mockResolvedValueOnce(
++			new Response(
++				JSON.stringify({
++					type: "hls",
++					playlistUrl: "x",
++					durationMs: 60000,
++					sourceOffsetMs: 0,
++					width: 1280,
++					height: 1024,
++					mediaCreatedAtMs: 1_700_000_000_000,
++				}),
++				{ status: 200, headers: { "Content-Type": "application/json" } },
++			),
++		);
++
++		const result = await resolvePreviewSource({ type: "media-id", mediaId: "clip-001" });
++
++		const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
++		expect(JSON.parse(init.body as string)).toEqual({
++			source: { type: "media-id", mediaId: "clip-001" },
++		});
++		expect(result.durationMs).toBe(60000);
++		expect(result.mediaCreatedAtMs).toBe(1_700_000_000_000);
++	});
++
+ 	it("throws when fetch returns non-ok response", async () => {
+ 		const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+ 		fetchSpy.mockResolvedValueOnce(new Response("nope", { status: 500 }));
+ 
+-		await expect(resolvePreviewSource("ch", 0, 1000)).rejects.toThrow(/500/);
++		await expect(
++			resolvePreviewSource({
++				type: "channel-range",
++				channelId: "ch",
++				startTimeMs: 0,
++				endTimeMs: 1000,
++			}),
++		).rejects.toThrow(/500/);
+ 	});
+ });
+diff --git a/apps/frontend/src/features/editor/external-preview/handle-parent-message.ts b/apps/frontend/src/features/editor/external-preview/handle-parent-message.ts
+index aab6959..cbd159a 100644
+--- a/apps/frontend/src/features/editor/external-preview/handle-parent-message.ts
++++ b/apps/frontend/src/features/editor/external-preview/handle-parent-message.ts
+@@ -23,6 +23,7 @@ export interface ParentMessageDeps {
+ 	responseCache: Map<string, ResponseCacheEntry>;
+ 	maxCacheSize: number;
+ 	addPreviewItem: (payload: PreviewItemPayload) => Promise<string>;
++	addStoredMedia: (mediaId: string) => Promise<string>;
+ 	clearProject: () => void;
+ 	postResponse: (
+ 		source: MessageEventSource | null,
+@@ -71,6 +72,7 @@ export const handleParentMessage = async (
+ 		responseCache,
+ 		maxCacheSize,
+ 		addPreviewItem,
++		addStoredMedia,
+ 		clearProject,
+ 		postResponse,
+ 	} = deps;
+@@ -79,13 +81,13 @@ export const handleParentMessage = async (
+ 		return;
+ 	}
+ 
+-	const reject = (requestId: string | undefined, reason: string) => {
++	const reject = (correlation: { requestId?: string; mediaId?: string }, reason: string) => {
+ 		const response: EditorPreviewItemRejectedMessage = createPreviewItemRejectedMessage(
+ 			reason,
+-			requestId,
++			correlation,
+ 		);
+-		if (requestId) {
+-			setCached(responseCache, maxCacheSize, requestId, response);
++		if (correlation.requestId) {
++			setCached(responseCache, maxCacheSize, correlation.requestId, response);
+ 		}
+ 		postResponse(event.source, event.origin, response);
+ 	};
+@@ -94,13 +96,16 @@ export const handleParentMessage = async (
+ 
+ 	const parsed = parentToEditorMessageSchema.safeParse(event.data);
+ 	if (!parsed.success) {
+-		reject(rawRequestId, parsed.error.issues[0]?.message || "Invalid message payload");
++		reject(
++			{ requestId: rawRequestId },
++			parsed.error.issues[0]?.message || "Invalid message payload",
++		);
+ 		return;
+ 	}
+ 
+ 	const message: ParentToEditorMessage = parsed.data;
+ 
+-	if (message.requestId) {
++	if (message.type !== "EDITOR_ADD_MEDIA" && message.requestId) {
+ 		const cachedResponse = responseCache.get(message.requestId);
+ 		if (cachedResponse) {
+ 			postResponse(event.source, event.origin, cachedResponse);
+@@ -117,24 +122,42 @@ export const handleParentMessage = async (
+ 			}
+ 			postResponse(event.source, event.origin, response);
+ 		} catch (error) {
+-			reject(message.requestId, error instanceof Error ? error.message : "Failed to clear project");
++			reject(
++				{ requestId: message.requestId },
++				error instanceof Error ? error.message : "Failed to clear project",
++			);
++		}
++		return;
++	}
++
++	if (message.type === "EDITOR_ADD_MEDIA") {
++		try {
++			const itemId = await addStoredMedia(message.mediaId);
++			const response: EditorPreviewItemAddedMessage = createPreviewItemAddedMessage(itemId, {
++				mediaId: message.mediaId,
++			});
++			postResponse(event.source, event.origin, response);
++		} catch (error) {
++			reject(
++				{ mediaId: message.mediaId },
++				error instanceof Error ? error.message : "Failed to add stored media",
++			);
+ 		}
+ 		return;
+ 	}
+ 
+ 	try {
+ 		const itemId = await addPreviewItem(message.payload);
+-		const response: EditorPreviewItemAddedMessage = createPreviewItemAddedMessage(
+-			itemId,
+-			message.requestId,
+-		);
++		const response: EditorPreviewItemAddedMessage = createPreviewItemAddedMessage(itemId, {
++			requestId: message.requestId,
++		});
+ 		if (message.requestId) {
+ 			setCached(responseCache, maxCacheSize, message.requestId, response);
+ 		}
+ 		postResponse(event.source, event.origin, response);
+ 	} catch (error) {
+ 		reject(
+-			message.requestId,
++			{ requestId: message.requestId },
+ 			error instanceof Error ? error.message : "Failed to add preview item",
+ 		);
+ 	}
+diff --git a/apps/frontend/src/features/editor/external-preview/payload-intake.ts b/apps/frontend/src/features/editor/external-preview/payload-intake.ts
+index 10b48fd..8fe0d5c 100644
+--- a/apps/frontend/src/features/editor/external-preview/payload-intake.ts
++++ b/apps/frontend/src/features/editor/external-preview/payload-intake.ts
+@@ -1,16 +1,71 @@
+ import { dispatch } from "@designcombo/events";
+ import type StateManager from "@designcombo/state";
+-import { ADD_AUDIO, ADD_VIDEO } from "@designcombo/state";
++import { ADD_AUDIO, ADD_IMAGE, ADD_VIDEO } from "@designcombo/state";
+ import { generateId } from "@designcombo/timeline";
+ import type { ITrackItem } from "@designcombo/types";
+ import type { PreviewItemPayload } from "@video-editor/contract/iframe/from-parent";
++import { fetchCore } from "@/utils/fetch-core";
+ import { TRACK_APPEND_INDEX } from "../constants/constants";
+ import { resetEditorForNewProject } from "../state/reset-editor";
+ import { resolvePreviewSource } from "./preview-source-api";
+ 
++const DEFAULT_IMAGE_DURATION_MS = 5000;
++
++type StoredMediaType = "Image" | "ClipVideo" | "UploadedVideo" | "ScreenShotFromLive";
++
++const buildStorageImageUrl = (mediaId: string): string => {
++	const prefix = import.meta.env.VITE_CORE_EXTENSION ?? "";
++	return `${prefix}/storage/${encodeURIComponent(mediaId)}/image`;
++};
++
++export class StoredMediaNotFoundError extends Error {
++	constructor(public readonly mediaId: string) {
++		super("media not found");
++		this.name = "StoredMediaNotFoundError";
++	}
++}
++
++export class CoreUnavailableError extends Error {
++	constructor(message = "core unavailable") {
++		super(message);
++		this.name = "CoreUnavailableError";
++	}
++}
++
++interface MediaWatchResponse {
++	type: StoredMediaType;
++	name?: string;
++}
++
++const fetchMediaWatch = async (mediaId: string): Promise<MediaWatchResponse> => {
++	let response: Response;
++	try {
++		response = await fetchCore(`/media/${encodeURIComponent(mediaId)}/watch`);
++	} catch (err) {
++		throw new CoreUnavailableError(err instanceof Error ? err.message : "core unavailable");
++	}
++	if (response.status === 404) {
++		throw new StoredMediaNotFoundError(mediaId);
++	}
++	if (!response.ok) {
++		throw new CoreUnavailableError(`core /media/${mediaId}/watch returned ${response.status}`);
++	}
++	const data = (await response.json()) as MediaWatchResponse;
++	if (
++		!data ||
++		(data.type !== "Image" &&
++			data.type !== "ClipVideo" &&
++			data.type !== "UploadedVideo" &&
++			data.type !== "ScreenShotFromLive")
++	) {
++		throw new CoreUnavailableError(`core /media/${mediaId}/watch returned unknown type`);
++	}
++	return data;
++};
++
+ export type ExternalMetadata = {
+-	sourceKind: "hls" | "mp4" | "audio";
+-	externalKind: "recording-range" | "media" | "audio-range";
++	externalKind: "recording-range" | "audio-range" | "stored-media";
++	storedMediaType?: StoredMediaType;
+ 	channelId?: string;
+ 	mediaId?: string;
+ 	audioId?: string;
+@@ -38,7 +93,6 @@ export const getDurationFromItem = (item: ITrackItem) => {
+ export const buildExternalMetadata = (payload: PreviewItemPayload): ExternalMetadata => {
+ 	if (payload.kind === "recording-range") {
+ 		return {
+-			sourceKind: "hls",
+ 			externalKind: "recording-range",
+ 			channelId: payload.channelId,
+ 			sourceStartTimeMs: payload.startTimeMs,
+@@ -47,17 +101,7 @@ export const buildExternalMetadata = (payload: PreviewItemPayload): ExternalMeta
+ 		};
+ 	}
+ 
+-	if (payload.kind === "media") {
+-		return {
+-			sourceKind: payload.playback.kind,
+-			externalKind: "media",
+-			mediaId: payload.mediaId,
+-			displayName: payload.name,
+-		};
+-	}
+-
+ 	return {
+-		sourceKind: payload.playback.kind,
+ 		externalKind: "audio-range",
+ 		audioId: payload.audioId,
+ 		sourceStartTimeMs: payload.startTimeMs,
+@@ -108,11 +152,8 @@ export const buildFallbackTrackItem = (
+ 			to: insertAtMs + (payload.durationMs ?? 0),
+ 		},
+ 		trim: {
+-			from: payload.kind === "recording-range" ? sourceOffsetMs : 0,
+-			to:
+-				payload.kind === "recording-range"
+-					? sourceOffsetMs + payload.durationMs
+-					: (payload.durationMs ?? 0),
++			from: sourceOffsetMs,
++			to: sourceOffsetMs + payload.durationMs,
+ 		},
+ 		duration: payload.durationMs,
+ 		details: {
+@@ -139,22 +180,9 @@ const appendItemState = (
+ 	const currentItem = (state.trackItemsMap[itemId] as ITrackItem | undefined)
+ 		? (state.trackItemsMap[itemId] as ITrackItem)
+ 		: fallbackItem;
+-	const currentDuration =
+-		payload.kind === "media" && payload.durationMs === undefined
+-			? getDurationFromItem(currentItem)
+-			: payload.durationMs;
+-
+-	const resolvedDuration = Math.max(currentDuration || 0, 0);
+-	const trimFrom =
+-		payload.kind === "recording-range" || payload.kind === "audio-range"
+-			? (sourceOffsetMsOverride ?? payload.sourceOffsetMs ?? 0)
+-			: (currentItem.trim?.from ?? 0);
+-	const trimTo =
+-		payload.kind === "recording-range" || payload.kind === "audio-range"
+-			? trimFrom + payload.durationMs
+-			: payload.kind === "media" && resolvedDuration > 0
+-				? trimFrom + resolvedDuration
+-				: (currentItem.trim?.to ?? trimFrom);
++	const resolvedDuration = Math.max(payload.durationMs || 0, 0);
++	const trimFrom = sourceOffsetMsOverride ?? payload.sourceOffsetMs ?? 0;
++	const trimTo = trimFrom + payload.durationMs;
+ 	const displayDuration =
+ 		resolvedDuration > 0 ? resolvedDuration : getDurationFromItem(currentItem);
+ 	const displayTo =
+@@ -196,6 +224,101 @@ const appendItemState = (
+ 	);
+ };
+ 
++const appendStoredImageState = (
++	stateManager: StateManager,
++	itemId: string,
++	insertAtMs: number,
++	durationMs: number,
++	src: string,
++	metadata: ExternalMetadata,
++) => {
++	const state = stateManager.getState();
++	const fallbackItem = {
++		id: itemId,
++		type: "image",
++		name: "image",
++		display: { from: insertAtMs, to: insertAtMs + durationMs },
++		duration: durationMs,
++		details: { src },
++		metadata: { previewUrl: "", ...metadata },
++	} as unknown as ITrackItem;
++
++	const currentItem = (state.trackItemsMap[itemId] as ITrackItem | undefined) ?? fallbackItem;
++	const nextTrackItemsMap = {
++		...state.trackItemsMap,
++		[itemId]: {
++			...currentItem,
++			display: { from: insertAtMs, to: insertAtMs + durationMs },
++			duration: durationMs,
++			metadata: {
++				...(currentItem.metadata || {}),
++				...metadata,
++				previewUrl: currentItem.metadata?.previewUrl || "",
++			},
++		},
++	};
++
++	stateManager.updateState(
++		{
++			trackItemsMap: nextTrackItemsMap,
++			duration: Object.values(nextTrackItemsMap).reduce((max, trackItem) => {
++				const displayTo = trackItem.display?.to ?? 0;
++				return Math.max(max, displayTo);
++			}, 0),
++		},
++		{ updateHistory: false, kind: "update" },
++	);
++};
++
++const appendStoredVideoState = (
++	stateManager: StateManager,
++	itemId: string,
++	insertAtMs: number,
++	durationMs: number,
++	src: string,
++	dimensions: { width: number; height: number },
++	metadata: ExternalMetadata,
++) => {
++	const state = stateManager.getState();
++	const fallbackItem = {
++		id: itemId,
++		type: "video",
++		name: "video",
++		display: { from: insertAtMs, to: insertAtMs + durationMs },
++		trim: { from: 0, to: durationMs },
++		duration: durationMs,
++		details: { src, ...dimensions },
++		metadata: { previewUrl: "", ...metadata },
++	} as unknown as ITrackItem;
++
++	const currentItem = (state.trackItemsMap[itemId] as ITrackItem | undefined) ?? fallbackItem;
++	const nextTrackItemsMap = {
++		...state.trackItemsMap,
++		[itemId]: {
++			...currentItem,
++			display: { from: insertAtMs, to: insertAtMs + durationMs },
++			trim: { from: 0, to: durationMs },
++			duration: durationMs,
++			metadata: {
++				...(currentItem.metadata || {}),
++				...metadata,
++				previewUrl: currentItem.metadata?.previewUrl || "",
++			},
++		},
++	};
++
++	stateManager.updateState(
++		{
++			trackItemsMap: nextTrackItemsMap,
++			duration: Object.values(nextTrackItemsMap).reduce((max, trackItem) => {
++				const displayTo = trackItem.display?.to ?? 0;
++				return Math.max(max, displayTo);
++			}, 0),
++		},
++		{ updateHistory: false, kind: "update" },
++	);
++};
++
+ export const addPreviewItemToEditor = async (
+ 	stateManager: StateManager,
+ 	payload: PreviewItemPayload,
+@@ -211,19 +334,17 @@ export const addPreviewItemToEditor = async (
+ 		let videoHeight = 1080;
+ 
+ 		if (payload.playback?.src) {
+-			// Fast path: Angular pre-resolved the HLS URL
+ 			hlsSrc = payload.playback.src;
+ 		} else {
+-			// Editor resolves HLS URL via POST /api/editor/preview-source
+-			const resolved = await resolvePreviewSource(
+-				payload.channelId,
+-				payload.startTimeMs,
+-				payload.endTimeMs,
+-			);
++			const resolved = await resolvePreviewSource({
++				type: "channel-range",
++				channelId: payload.channelId,
++				startTimeMs: payload.startTimeMs,
++				endTimeMs: payload.endTimeMs,
++			});
+ 			hlsSrc = resolved.playlistUrl;
+ 			videoWidth = resolved.width;
+ 			videoHeight = resolved.height;
+-			// Use backend-computed sourceOffsetMs if not provided by the parent
+ 			if (payload.sourceOffsetMs === undefined) {
+ 				resolvedSourceOffsetMs = resolved.sourceOffsetMs;
+ 			}
+@@ -282,52 +403,6 @@ export const addPreviewItemToEditor = async (
+ 		return itemId;
+ 	}
+ 
+-	if (payload.kind === "media") {
+-		dispatch(ADD_VIDEO, {
+-			payload: {
+-				id: itemId,
+-				type: "video",
+-				name: "video",
+-				display:
+-					payload.durationMs !== undefined
+-						? {
+-								from: insertAtMs,
+-								to: insertAtMs + payload.durationMs,
+-							}
+-						: undefined,
+-				trim:
+-					payload.durationMs !== undefined
+-						? {
+-								from: 0,
+-								to: payload.durationMs,
+-							}
+-						: undefined,
+-				duration: payload.durationMs,
+-				details: {
+-					src: payload.playback.src,
+-				},
+-				metadata: {
+-					previewUrl: payload.posterSrc || "",
+-					...metadata,
+-				},
+-			},
+-			options: {
+-				resourceId: "main",
+-				scaleMode: "fit",
+-				isSelected: false,
+-			},
+-		});
+-		appendItemState(
+-			stateManager,
+-			itemId,
+-			insertAtMs,
+-			payload,
+-			metadata,
+-			buildFallbackTrackItem(itemId, insertAtMs, payload, metadata, payload.playback.src, 0),
+-		);
+-		return itemId;
+-	}
+-
+ 	dispatch(ADD_AUDIO, {
+ 		payload: {
+ 			id: itemId,
+@@ -374,6 +449,92 @@ export const addPreviewItemToEditor = async (
+ 	return itemId;
+ };
+ 
++export const addStoredMediaToEditor = async (
++	stateManager: StateManager,
++	mediaId: string,
++): Promise<string> => {
++	const watch = await fetchMediaWatch(mediaId);
++	const itemId = generateId();
++	const insertAtMs = getProjectDuration(stateManager);
++
++	if (watch.type === "Image" || watch.type === "ScreenShotFromLive") {
++		const durationMs = DEFAULT_IMAGE_DURATION_MS;
++		const src = buildStorageImageUrl(mediaId);
++		const metadata: ExternalMetadata = {
++			externalKind: "stored-media",
++			storedMediaType: watch.type,
++			mediaId,
++			displayName: watch.name,
++		};
++		dispatch(ADD_IMAGE, {
++			payload: {
++				id: itemId,
++				type: "image",
++				display: {
++					from: insertAtMs,
++					to: insertAtMs + durationMs,
++				},
++				duration: durationMs,
++				details: { src },
++				metadata: { previewUrl: "", ...metadata },
++			},
++			options: {
++				resourceId: "main",
++				scaleMode: "fit",
++				isSelected: false,
++			},
++		});
++		appendStoredImageState(stateManager, itemId, insertAtMs, durationMs, src, metadata);
++		return itemId;
++	}
++
++	// ClipVideo | UploadedVideo
++	const resolved = await resolvePreviewSource({ type: "media-id", mediaId });
++	const metadata: ExternalMetadata = {
++		externalKind: "stored-media",
++		storedMediaType: watch.type,
++		mediaId,
++		displayName: watch.name,
++	};
++	dispatch(ADD_VIDEO, {
++		payload: {
++			id: itemId,
++			type: "video",
++			name: "video",
++			display: {
++				from: insertAtMs,
++				to: insertAtMs + resolved.durationMs,
++			},
++			trim: {
++				from: 0,
++				to: resolved.durationMs,
++			},
++			duration: resolved.durationMs,
++			details: {
++				src: resolved.playlistUrl,
++				width: resolved.width,
++				height: resolved.height,
++			},
++			metadata: { previewUrl: "", ...metadata },
++		},
++		options: {
++			resourceId: "main",
++			scaleMode: "fit",
++			isSelected: false,
++		},
++	});
++	appendStoredVideoState(
++		stateManager,
++		itemId,
++		insertAtMs,
++		resolved.durationMs,
++		resolved.playlistUrl,
++		{ width: resolved.width, height: resolved.height },
++		metadata,
++	);
++	return itemId;
++};
++
+ export const clearProject = (stateManager: StateManager) => {
+ 	const currentState = stateManager.getState();
+ 	stateManager.updateState(
+diff --git a/apps/frontend/src/features/editor/external-preview/preview-source-api.ts b/apps/frontend/src/features/editor/external-preview/preview-source-api.ts
+index 9a7dcbe..c76fb81 100644
+--- a/apps/frontend/src/features/editor/external-preview/preview-source-api.ts
++++ b/apps/frontend/src/features/editor/external-preview/preview-source-api.ts
+@@ -3,33 +3,40 @@ import { fetchServer } from "@/utils/fetch-server";
+ export interface PreviewSourceResponse {
+ 	type: "hls";
+ 	playlistUrl: string;
+-	channelId: string;
+-	requestedStartMs: number;
+-	requestedEndMs: number;
+ 	durationMs: number;
+ 	sourceOffsetMs: number;
+ 	width: number;
+ 	height: number;
++	mediaCreatedAtMs?: number;
+ }
+ 
++export type PreviewSourceRequest =
++	| {
++			type: "channel-range";
++			channelId: string;
++			startTimeMs: number;
++			endTimeMs: number;
++	  }
++	| {
++			type: "media-id";
++			mediaId: string;
++	  };
++
+ /**
+- * Calls the editor backend to convert a channel recording range into an HLS playlist URL.
+- * The backend fetches the MPD from the channel play API, converts it to HLS VOD, stores
+- * the playlist in S3, and returns the presigned playlist URL.
++ * Calls the editor backend to resolve a preview source into an HLS playlist URL.
++ * For `channel-range`, backend fetches MPD from the channel play API.
++ * For `media-id`, backend fetches MPD from /videos/{id}/play. Both convert to HLS VOD,
++ * store the playlist in S3, and return the presigned playlist URL.
+  *
+- * Throws on non-200 responses — callers should catch and send EDITOR_PREVIEW_ITEM_REJECTED.
++ * Throws on non-200 — callers should catch and send EDITOR_PREVIEW_ITEM_REJECTED.
+  */
+ export const resolvePreviewSource = async (
+-	channelId: string,
+-	startTimeMs: number,
+-	endTimeMs: number,
++	source: PreviewSourceRequest,
+ ): Promise<PreviewSourceResponse> => {
+ 	const response = await fetchServer("/editor/preview-source", {
+ 		method: "POST",
+ 		headers: { "Content-Type": "application/json" },
+-		body: JSON.stringify({
+-			source: { type: "channel-range", channelId, startTimeMs, endTimeMs },
+-		}),
++		body: JSON.stringify({ source }),
+ 	});
+ 
+ 	if (!response.ok) {
+diff --git a/apps/frontend/src/features/editor/external-preview/use-editor-post-message.ts b/apps/frontend/src/features/editor/external-preview/use-editor-post-message.ts
+index 56c17fe..72c783c 100644
+--- a/apps/frontend/src/features/editor/external-preview/use-editor-post-message.ts
++++ b/apps/frontend/src/features/editor/external-preview/use-editor-post-message.ts
+@@ -5,7 +5,7 @@ import type {
+ } from "@video-editor/contract/iframe/to-parent";
+ import { useEffect, useMemo, useRef } from "react";
+ import { handleParentMessage, type ResponseCacheEntry } from "./handle-parent-message";
+-import { addPreviewItemToEditor, clearProject } from "./payload-intake";
++import { addPreviewItemToEditor, addStoredMediaToEditor, clearProject } from "./payload-intake";
+ import { parseAllowedOrigins } from "./utils";
+ 
+ export const useEditorPostMessage = (stateManager: StateManager) => {
+@@ -36,6 +36,7 @@ export const useEditorPostMessage = (stateManager: StateManager) => {
+ 					responseCache: responseCacheRef.current,
+ 					maxCacheSize: MAX_RESPONSE_CACHE_SIZE,
+ 					addPreviewItem: (payload) => addPreviewItemToEditor(stateManager, payload),
++					addStoredMedia: (mediaId) => addStoredMediaToEditor(stateManager, mediaId),
+ 					clearProject: () => clearProject(stateManager),
+ 					postResponse,
+ 				},
+diff --git a/apps/frontend/src/features/editor/hooks/use-easter-eggs.ts b/apps/frontend/src/features/editor/hooks/use-easter-eggs.ts
+index 24cc4d6..d442c09 100644
+--- a/apps/frontend/src/features/editor/hooks/use-easter-eggs.ts
++++ b/apps/frontend/src/features/editor/hooks/use-easter-eggs.ts
+@@ -251,6 +251,21 @@ html.__barbie * {
+ }
+ `;
+ 
++const FLIP_DURATION_MS = 700;
++
++const FLIP_STYLE = `
++@keyframes __roniCutFlip {
++  0%   { transform: rotateY(0deg); }
++  100% { transform: rotateY(360deg); }
++}
++.__roni-cut-flipping {
++  animation: __roniCutFlip ${FLIP_DURATION_MS}ms ease-in-out forwards;
++  transform-style: preserve-3d;
++  backface-visibility: hidden;
++  perspective: 1000px;
++}
++`;
++
+ const GUMMY_STYLE = `
+ @keyframes __gummy-pop {
+   0%   { transform: scale(0) rotate(-180deg); opacity: 0; }
+@@ -1020,9 +1035,32 @@ export default function useEasterEggs(): void {
+ 
+ 		// ────────────────────────────────────────────────────────────────────────
+ 
++		let flipSwapTimer: ReturnType<typeof setTimeout> | null = null;
++
++		function triggerRoniCutFlip(target: HTMLElement): void {
++			if (target.classList.contains("__roni-cut-flipping")) return;
++			if (!document.getElementById("__flip_style")) {
++				injectStyle("__flip_style", FLIP_STYLE);
++			}
++			target.classList.add("__roni-cut-flipping");
++			if (flipSwapTimer !== null) clearTimeout(flipSwapTimer);
++			flipSwapTimer = setTimeout(() => {
++				flipSwapTimer = null;
++				window.dispatchEvent(new CustomEvent("__roni-cut-flip"));
++			}, FLIP_DURATION_MS / 2);
++			target.addEventListener(
++				"animationend",
++				() => {
++					target.classList.remove("__roni-cut-flipping");
++				},
++				{ once: true },
++			);
++		}
++
+ 		function onDocClick(e: MouseEvent): void {
+ 			const target = e.target as HTMLElement;
+-			if (!target.closest("[data-roni-cut]")) return;
++			const wrapper = target.closest("[data-roni-cut]") as HTMLElement | null;
++			if (!wrapper) return;
+ 			const now = Date.now();
+ 			sidClickTimestamps.push(now);
+ 			if (sidClickTimestamps.length > SID_CLICK_COUNT) sidClickTimestamps.shift();
+@@ -1032,6 +1070,7 @@ export default function useEasterEggs(): void {
+ 			) {
+ 				sidClickTimestamps.length = 0;
+ 				showSid();
++				triggerRoniCutFlip(wrapper);
+ 			}
+ 		}
+ 
+@@ -1122,6 +1161,8 @@ export default function useEasterEggs(): void {
+ 			removeEl("__barbie_sparkles");
+ 			closeGummy();
+ 			if (gummyLongPressTimer !== null) clearTimeout(gummyLongPressTimer);
++			if (flipSwapTimer !== null) clearTimeout(flipSwapTimer);
++			removeEl("__flip_style");
+ 		};
+ 	}, []);
+ }
+diff --git a/apps/frontend/src/features/editor/hooks/use-timeline-edge-scroll.ts b/apps/frontend/src/features/editor/hooks/use-timeline-edge-scroll.ts
+index 0ae5fc7..23c8371 100644
+--- a/apps/frontend/src/features/editor/hooks/use-timeline-edge-scroll.ts
++++ b/apps/frontend/src/features/editor/hooks/use-timeline-edge-scroll.ts
+@@ -5,8 +5,8 @@ const DWELL_DELAY_MS = 600; // ms the mouse must stay before scroll starts
+ const BASE_SPEED = 1.5; // px/frame at edge boundary
+ const MAX_SPEED = 7; // px/frame at edge tip
+ 
+-export type EdgeScrollSide = "left" | "right" | null;
+-export type EdgeScrollPhase = "dwell" | "scrolling" | null;
++type EdgeScrollSide = "left" | "right" | null;
++type EdgeScrollPhase = "dwell" | "scrolling" | null;
+ 
+ export interface EdgeScrollState {
+ 	side: EdgeScrollSide;
+diff --git a/apps/frontend/src/features/editor/navbar.tsx b/apps/frontend/src/features/editor/navbar.tsx
+index 42e154c..6b6794a 100644
+--- a/apps/frontend/src/features/editor/navbar.tsx
++++ b/apps/frontend/src/features/editor/navbar.tsx
+@@ -119,6 +119,15 @@ export default function Navbar({
+ 		setCanvasHeight(String(size.height));
+ 	}, [size.width, size.height]);
+ 
++	useEffect(() => {
++		const handleFlip = () => {
++			setTitle("RoniCut");
++			setProjectName("RoniCut");
++		};
++		window.addEventListener("__roni-cut-flip", handleFlip);
++		return () => window.removeEventListener("__roni-cut-flip", handleFlip);
++	}, [setProjectName]);
++
+ 	const handleTitleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+ 		setTitle(e.target.value);
+ 	};
+diff --git a/apps/frontend/src/features/editor/utils/__tests__/extract-saved-items.test.ts b/apps/frontend/src/features/editor/utils/__tests__/extract-saved-items.test.ts
+index c99a0a9..5c741bd 100644
+--- a/apps/frontend/src/features/editor/utils/__tests__/extract-saved-items.test.ts
++++ b/apps/frontend/src/features/editor/utils/__tests__/extract-saved-items.test.ts
+@@ -19,11 +19,26 @@ describe("extractSavedItems", () => {
+ 		expect(extractSavedItems({})).toEqual([]);
+ 	});
+ 
+-	it("maps image item", () => {
++	it("maps image item (no metadata) by item id", () => {
+ 		const items = { img1: makeItem({ id: "img1", type: "image" }) };
+ 		expect(extractSavedItems(items)).toEqual([{ type: "image", id: "img1" }]);
+ 	});
+ 
++	it("maps stored-media image item using metadata.mediaId", () => {
++		const items = {
++			img1: makeItem({
++				id: "track-xyz",
++				type: "image",
++				metadata: {
++					externalKind: "stored-media",
++					storedMediaType: "Image",
++					mediaId: "img-001",
++				},
++			}),
++		};
++		expect(extractSavedItems(items)).toEqual([{ type: "image", id: "img-001" }]);
++	});
++
+ 	it("maps recording-range item using channelId", () => {
+ 		const items = {
+ 			v1: makeItem({
+@@ -89,7 +104,7 @@ describe("extractSavedItems", () => {
+ 			v1: makeItem({
+ 				id: "v1",
+ 				type: "video",
+-				metadata: { externalKind: "media", mediaId: "media-42" },
++				metadata: { externalKind: "stored-media", mediaId: "media-42" },
+ 			}),
+ 		};
+ 		expect(extractSavedItems(items)).toEqual([{ type: "clip", id: "media-42" }]);
+@@ -120,7 +135,7 @@ describe("extractSavedItems", () => {
+ 			v2: makeItem({
+ 				id: "v2",
+ 				type: "video",
+-				metadata: { externalKind: "media", mediaId: "media-1" },
++				metadata: { externalKind: "stored-media", mediaId: "media-1" },
+ 			}),
+ 		};
+ 		const result = extractSavedItems(items);
+@@ -168,7 +183,7 @@ describe("extractSavedItems", () => {
+ 			v_clip: makeItem({
+ 				id: "v_clip",
+ 				type: "video",
+-				metadata: { externalKind: "media", mediaId: "media-9" },
++				metadata: { externalKind: "stored-media", mediaId: "media-9" },
+ 			}),
+ 		};
+ 		const result = extractSavedItems(items);
+diff --git a/apps/frontend/src/features/editor/utils/extract-saved-items.ts b/apps/frontend/src/features/editor/utils/extract-saved-items.ts
+index 9415d01..dfe3c4e 100644
+--- a/apps/frontend/src/features/editor/utils/extract-saved-items.ts
++++ b/apps/frontend/src/features/editor/utils/extract-saved-items.ts
+@@ -9,7 +9,8 @@ export function extractSavedItems(trackItemsMap: Record<string, ITrackItem>): Sa
+ 	// Images — one entry per item, no timeranges
+ 	for (const item of items) {
+ 		if (item.type === "image") {
+-			result.push({ type: "image", id: item.id });
++			const meta = item.metadata as ExternalMetadata | undefined;
++			result.push({ type: "image", id: meta?.mediaId || item.id });
+ 		}
+ 	}
+ 
+diff --git a/apps/frontend/vite.config.ts b/apps/frontend/vite.config.ts
+index 7ad7f20..add77c2 100644
+--- a/apps/frontend/vite.config.ts
++++ b/apps/frontend/vite.config.ts
+@@ -29,7 +29,7 @@ export default defineConfig(({ mode }) => {
+ 					target: process.env.VITE_API_URL || "http://localhost:4001",
+ 					changeOrigin: true,
+ 				},
+-				"^/private/(media|users|channels)": {
++				"^/private/(media|users|channels|storage|videos)": {
+ 					target: process.env.VITE_CORE_URL || "http://localhost:8002",
+ 					changeOrigin: true,
+ 				},
+diff --git a/apps/iframe-demo/CLAUDE.md b/apps/iframe-demo/CLAUDE.md
+index 68b8df4..feea2d7 100644
+--- a/apps/iframe-demo/CLAUDE.md
++++ b/apps/iframe-demo/CLAUDE.md
+@@ -37,9 +37,11 @@ pnpm type-check   # tsc -p tsconfig.json --noEmit
+ 
+ Editor iframe is loaded at `editorUrl` from `environment.ts`. The demo app:
+ 
+-1. Sends `EDITOR_ADD_PREVIEW_ITEM` (`recording-range` kind) to the editor
++1. Right panel has two send forms:
++   - `recording-range` — channel id + start/end time → sends `EDITOR_ADD_PREVIEW_ITEM`
++   - `media` — single text input bound to `mediaId` → sends `EDITOR_ADD_MEDIA { mediaId }`. Preset chips for `img-001`, `img-002`, `img-003`, `demo-clip-001`, `uploaded-001`, `screenshot-001` (all served by `apps/core-mock`).
+ 2. Sends `EDITOR_CLEAR_PROJECT` to reset the editor
+-3. Displays outgoing payload and last response
++3. Displays outgoing payload and last response. Response panel matches `EDITOR_ADD_MEDIA` replies by echoed `mediaId` (not `requestId`).
+ 
+ Auth (`ztube-token`) is **not** forwarded via postMessage. The cookie is HttpOnly and travels server-side: the iframe's fetch to its same-origin server attaches it automatically.
+ 
+diff --git a/apps/iframe-demo/README.md b/apps/iframe-demo/README.md
+index c2b9533..23b742c 100644
+--- a/apps/iframe-demo/README.md
++++ b/apps/iframe-demo/README.md
+@@ -35,10 +35,13 @@ cd apps/iframe-demo && pnpm dev  # port 8080
+ 
+ The demo page (`/`) loads the editor in a floating, draggable and resizable iframe pointed at `http://localhost:3000/editor/embed`. A control panel lets you:
+ 
+-- **Add a preview item** — sends `EDITOR_ADD_PREVIEW_ITEM` (recording-range) to the editor
++- **Send recording-range** — channel id + start/end time → sends `EDITOR_ADD_PREVIEW_ITEM`
++- **Send media** — id text input with preset chips (`img-001`, `img-002`, `img-003`, `demo-clip-001`, `uploaded-001`, `screenshot-001` — all backed by `apps/core-mock`) → sends `EDITOR_ADD_MEDIA { mediaId }`
+ - **Clear the project** — sends `EDITOR_CLEAR_PROJECT` to reset all tracks
+ - **Inspect messages** — displays the outgoing payload and last response from the editor
+ 
++Note: `EDITOR_ADD_MEDIA` responses correlate by echoed `mediaId`, not `requestId`.
++
+ ## Key Files
+ 
+ | File | Purpose |
+diff --git a/apps/iframe-demo/angular.json b/apps/iframe-demo/angular.json
+index 61dd95d..0cc4619 100644
+--- a/apps/iframe-demo/angular.json
++++ b/apps/iframe-demo/angular.json
+@@ -42,8 +42,8 @@
+ 								},
+ 								{
+ 									"type": "anyComponentStyle",
+-									"maximumWarning": "6kB",
+-									"maximumError": "10kB"
++									"maximumWarning": "8kB",
++									"maximumError": "12kB"
+ 								}
+ 							],
+ 							"outputHashing": "all",
+diff --git a/apps/iframe-demo/biome.jsonc b/apps/iframe-demo/biome.jsonc
+index 935235b..133c9ba 100644
+--- a/apps/iframe-demo/biome.jsonc
++++ b/apps/iframe-demo/biome.jsonc
+@@ -9,6 +9,11 @@
+ 	"files": {
+ 		"includes": ["!**/node_modules", "!**/dist"]
+ 	},
++	"html": {
++		"parser": {
++			"interpolation": true
++		}
++	},
+ 	"overrides": [
+ 		{
+ 			"includes": ["src/**"],
+diff --git a/apps/iframe-demo/src/app/message-types.ts b/apps/iframe-demo/src/app/message-types.ts
+index e70cb95..764b4b6 100644
+--- a/apps/iframe-demo/src/app/message-types.ts
++++ b/apps/iframe-demo/src/app/message-types.ts
+@@ -1,4 +1,5 @@
+ export const EDITOR_ADD_PREVIEW_ITEM = "EDITOR_ADD_PREVIEW_ITEM";
++export const EDITOR_ADD_MEDIA = "EDITOR_ADD_MEDIA";
+ export const EDITOR_CLEAR_PROJECT = "EDITOR_CLEAR_PROJECT";
+ export const EDITOR_READY = "EDITOR_READY";
+ 
+@@ -11,15 +12,6 @@ export type RecordingRangePayload = {
+ 	name?: string;
+ };
+ 
+-export type MediaPayload = {
+-	kind: "media";
+-	mediaId: string;
+-	durationMs?: number;
+-	playback: { kind: "mp4" | "hls"; src: string };
+-	posterSrc?: string;
+-	name?: string;
+-};
+-
+ export type AudioRangePayload = {
+ 	kind: "audio-range";
+ 	audioId: string;
+@@ -31,11 +23,12 @@ export type AudioRangePayload = {
+ 	name?: string;
+ };
+ 
+-export type PreviewItemPayload = RecordingRangePayload | MediaPayload | AudioRangePayload;
++export type PreviewItemPayload = RecordingRangePayload | AudioRangePayload;
+ 
+ export interface EditorResponse {
+ 	type?: string;
+ 	requestId?: string;
++	mediaId?: string;
+ 	reason?: string;
+ 	itemId?: string;
+ }
+diff --git a/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.html b/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.html
+index 1437092..2416077 100644
+--- a/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.html
++++ b/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.html
+@@ -33,107 +33,186 @@
+   <!-- Right panel -->
+   <aside class="panel">
+     <header class="panel-header">
+-      <h1 class="panel-title">הדגמת מסגרת</h1>
+-      <p class="panel-desc">
+-        שלח הודעות postMessage לעורך המוטמע.
+-        פריטים שנוספו מדף המדיה נשלחים אוטומטית עם ההגעה.
+-      </p>
++      <div class="panel-header-row">
++        <h1 class="panel-title">הדגמת מסגרת</h1>
++        <div class="frame-mode" role="group" aria-label="מצב מסגרת">
++          <button
++            type="button"
++            class="icon-btn"
++            [class.active]="!fullMode()"
++            (click)="fullMode.set(false)"
++            [attr.aria-pressed]="!fullMode()"
++            aria-label="מצב חלון"
++            title="חלון ניתן לשינוי גודל"
++          >▢</button>
++          <button
++            type="button"
++            class="icon-btn"
++            [class.active]="fullMode()"
++            (click)="fullMode.set(true)"
++            [attr.aria-pressed]="fullMode()"
++            aria-label="מסך מלא"
++            title="מסך מלא"
++          >▣</button>
++        </div>
++      </div>
++      <button type="button" class="btn-danger-text" (click)="clearProject()">נקה פרויקט</button>
+     </header>
+ 
+-    <!-- Recording range form -->
+-    <form class="form-section" (submit)="$event.preventDefault(); addRecordingRange()">
+-      <fieldset>
+-        <legend class="section-title">טווח הקלטה</legend>
++    <nav class="tab-bar" role="tablist" aria-label="סוג פריט">
++      <button
++        type="button"
++        role="tab"
++        class="tab"
++        [class.active]="activeTab() === 'recording'"
++        [attr.aria-selected]="activeTab() === 'recording'"
++        (click)="activeTab.set('recording')"
++      >הקלטה</button>
++      <button
++        type="button"
++        role="tab"
++        class="tab"
++        [class.active]="activeTab() === 'media'"
++        [attr.aria-selected]="activeTab() === 'media'"
++        (click)="activeTab.set('media')"
++      >מדיה</button>
++      <button
++        type="button"
++        role="tab"
++        class="tab"
++        [class.active]="activeTab() === 'output'"
++        [attr.aria-selected]="activeTab() === 'output'"
++        (click)="activeTab.set('output')"
++      >פלט</button>
++    </nav>
+ 
+-        <div class="field">
+-          <label for="name">שם</label>
+-          <input
+-            id="name"
+-            type="text"
+-            autocomplete="off"
+-            [value]="name()"
+-            (input)="name.set($any($event.target).value)"
+-          />
+-        </div>
++    <div class="tab-panel">
++      @switch (activeTab()) {
++        @case ('recording') {
++          <form class="form-section" (submit)="$event.preventDefault(); addRecordingRange()">
++            <div class="field">
++              <label for="name">שם</label>
++              <input
++                id="name"
++                type="text"
++                autocomplete="off"
++                placeholder="לדוגמה: הקלטת חדר ישיבות…"
++                [value]="name()"
++                (input)="name.set($any($event.target).value)"
++              />
++            </div>
+ 
+-        <div class="field">
+-          <label for="channelId">מזהה ערוץ</label>
+-          <input
+-            id="channelId"
+-            type="text"
+-            inputmode="numeric"
+-            autocomplete="off"
+-            [value]="channelId()"
+-            (input)="channelId.set($any($event.target).value)"
+-          />
+-        </div>
++            <div class="field">
++              <label for="channelId">מזהה ערוץ</label>
++              <input
++                id="channelId"
++                type="text"
++                inputmode="numeric"
++                autocomplete="off"
++                spellcheck="false"
++                [value]="channelId()"
++                (input)="channelId.set($any($event.target).value)"
++              />
++            </div>
+ 
+-        <div class="field">
+-          <label for="startTimeMs">זמן התחלה (ms)</label>
+-          <input
+-            id="startTimeMs"
+-            type="number"
+-            min="0"
+-            autocomplete="off"
+-            [value]="startTimeMs()"
+-            (input)="startTimeMs.set(+$any($event.target).value)"
+-          />
+-        </div>
++            <div class="field-row">
++              <div class="field">
++                <label for="startTimeMs">התחלה (ms)</label>
++                <input
++                  id="startTimeMs"
++                  type="number"
++                  min="0"
++                  inputmode="numeric"
++                  autocomplete="off"
++                  spellcheck="false"
++                  [value]="startTimeMs()"
++                  (input)="startTimeMs.set(+$any($event.target).value)"
++                />
++              </div>
+ 
+-        <div class="field">
+-          <label for="endTimeMs">זמן סיום (ms)</label>
+-          <input
+-            id="endTimeMs"
+-            type="number"
+-            min="0"
+-            autocomplete="off"
+-            [value]="endTimeMs()"
+-            (input)="endTimeMs.set(+$any($event.target).value)"
+-          />
+-        </div>
+-      </fieldset>
++              <div class="field">
++                <label for="endTimeMs">סיום (ms)</label>
++                <input
++                  id="endTimeMs"
++                  type="number"
++                  min="0"
++                  inputmode="numeric"
++                  autocomplete="off"
++                  spellcheck="false"
++                  [value]="endTimeMs()"
++                  (input)="endTimeMs.set(+$any($event.target).value)"
++                />
++              </div>
++            </div>
+ 
+-      <div class="actions">
+-        <button type="submit" class="btn-primary">הוסף הקלטה</button>
+-        <button type="button" class="btn-secondary" (click)="clearProject()">נקה פרויקט</button>
+-      </div>
+-    </form>
++            <div class="actions">
++              <button type="submit" class="btn-primary">הוסף הקלטה</button>
++            </div>
++          </form>
++        }
+ 
+-    <div class="mode-toggle">
+-      <span class="section-title">מצב מסגרת</span>
+-      <div class="toggle-row" role="group" aria-label="מצב מסגרת">
+-        <button
+-          type="button"
+-          class="btn-mode"
+-          [class.active]="!fullMode()"
+-          (click)="fullMode.set(false)"
+-        >ניתן לשינוי גודל</button>
+-        <button
+-          type="button"
+-          class="btn-mode"
+-          [class.active]="fullMode()"
+-          (click)="fullMode.set(true)"
+-        >מסך מלא</button>
+-      </div>
+-    </div>
++        @case ('media') {
++          <form class="form-section" (submit)="$event.preventDefault(); addMediaFromForm()">
++            <div class="field">
++              <label for="mediaId">מזהה מדיה</label>
++              <input
++                id="mediaId"
++                type="text"
++                autocomplete="off"
++                spellcheck="false"
++                placeholder="img-001 / demo-clip-001 / …"
++                [value]="mediaId()"
++                (input)="mediaId.set($any($event.target).value)"
++              />
++            </div>
+ 
+-    <div class="json-section">
+-      <span class="section-title">תגובה / שליחה</span>
+-      <pre class="json-display">{{ stringify({ outgoing: outgoingPayload(), lastResponse: lastResponse() }) }}</pre>
+-    </div>
++            @if (mediaError()) {
++              <p class="form-error" role="alert">{{ mediaError() }}</p>
++            }
++
++            <div class="actions">
++              <button type="submit" class="btn-primary">הוסף מדיה</button>
++            </div>
+ 
+-    @if (exportResult()) {
+-      <div class="export-result-section">
+-        <span class="section-title">תוצאת ייצוא</span>
+-        @if (exportResult()!.exportType === 'mp4') {
+-          <video [src]="exportResult()!.url" controls class="result-media">
+-            <track kind="captions" />
+-          </video>
+-        } @else {
+-          <img [src]="exportResult()!.url" alt="תצוגה מקדימה" class="result-media" />
++            <div class="quick-picks">
++              <span class="section-title">דמו מהיר</span>
++              <div class="actions">
++                @for (preset of presetIds; track preset.id) {
++                  <button
++                    type="button"
++                    class="chip"
++                    (click)="addPresetMedia(preset.id)"
++                    [attr.aria-label]="'הוסף מדיה ' + preset.id"
++                  >{{ preset.label }}</button>
++                }
++              </div>
++            </div>
++          </form>
+         }
+-        <a [href]="exportResult()!.url" download class="btn-secondary result-download">הורד</a>
+-      </div>
+-    }
++
++        @case ('output') {
++          <div class="form-section output-section">
++            <div class="json-section">
++              <span class="section-title">הודעה אחרונה</span>
++              <pre class="json-display" aria-live="polite">{{ stringify({ outgoing: outgoingPayload(), lastResponse: lastResponse() }) }}</pre>
++            </div>
++
++            @if (exportResult()) {
++              <div class="export-result-section">
++                <span class="section-title">תוצאת ייצוא</span>
++                @if (exportResult()!.exportType === 'mp4') {
++                  <video [src]="exportResult()!.url" controls class="result-media" width="320" height="180">
++                    <track kind="captions" />
++                  </video>
++                } @else {
++                  <img [src]="exportResult()!.url" alt="תצוגה מקדימה של תוצאת הייצוא" class="result-media" width="320" height="180" />
++                }
++                <a [href]="exportResult()!.url" download class="btn-secondary result-download">הורד</a>
++              </div>
++            }
++          </div>
++        }
++      }
++    </div>
+   </aside>
+ </div>
+diff --git a/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.scss b/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.scss
+index 15d96ed..f0d3e40 100644
+--- a/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.scss
++++ b/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.scss
+@@ -29,40 +29,6 @@
+   }
+ }
+ 
+-.title-bar {
+-  height: 36px;
+-  background: linear-gradient(180deg, #2e2e33 0%, #27272a 100%);
+-  border-bottom: 1px solid #3f3f46;
+-  display: flex;
+-  align-items: center;
+-  padding: 0 12px;
+-  gap: 6px;
+-  cursor: grab;
+-  user-select: none;
+-  flex-shrink: 0;
+-  direction: ltr;
+-
+-  &:active { cursor: grabbing; }
+-}
+-
+-.title-dot {
+-  width: 10px;
+-  height: 10px;
+-  border-radius: 50%;
+-  background: #3f3f46;
+-
+-  &:nth-child(2) { background: #ef4444; }
+-  &:nth-child(3) { background: #f59e0b; }
+-  &:nth-child(4) { background: #10b981; }
+-}
+-
+-.title-label {
+-  margin-inline-start: auto;
+-  font-size: 12px;
+-  color: #71717a;
+-  font-weight: 500;
+-}
+-
+ .editor-iframe {
+   flex: 1;
+   width: 100%;
+@@ -71,7 +37,6 @@
+   border: none;
+ }
+ 
+-
+ .panel {
+   flex-shrink: 0;
+   width: 360px;
+@@ -79,49 +44,152 @@
+   border-inline-start: 1px solid #27272a;
+   background: #18181b;
+   padding: 0;
+-  overflow-y: auto;
+   display: flex;
+   flex-direction: column;
++  direction: rtl;
+ }
+ 
+ .panel-header {
+-  padding: 24px 20px 20px;
++  padding: 16px 20px 12px;
+   border-bottom: 1px solid #27272a;
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++  flex-shrink: 0;
++}
++
++.panel-header-row {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 12px;
+ }
+ 
+ .panel-title {
+-  margin: 0 0 6px;
+-  font-size: 18px;
++  margin: 0;
++  font-size: 16px;
+   font-weight: 700;
+   color: #f4f4f5;
+   letter-spacing: -0.01em;
+ }
+ 
+-.panel-desc {
+-  margin: 0;
+-  font-size: 13px;
++.frame-mode {
++  display: flex;
++  gap: 4px;
++  background: #09090b;
++  border: 1px solid #27272a;
++  border-radius: 8px;
++  padding: 2px;
++}
++
++.icon-btn {
++  background: transparent;
+   color: #71717a;
+-  line-height: 1.6;
++  border: none;
++  border-radius: 6px;
++  width: 28px;
++  height: 28px;
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  font-size: 14px;
++  font-family: inherit;
++  cursor: pointer;
++  touch-action: manipulation;
++  transition: background-color 0.15s, color 0.15s;
++
++  &:hover { color: #a1a1aa; }
++
++  &.active {
++    background: #27272a;
++    color: #f4f4f5;
++  }
++
++  &:focus-visible {
++    outline: none;
++    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18);
++  }
+ }
+ 
++.btn-danger-text {
++  background: transparent;
++  color: #f87171;
++  border: 1px dashed #3f1f22;
++  border-radius: 6px;
++  padding: 6px 10px;
++  font-size: 12px;
++  font-weight: 500;
++  font-family: inherit;
++  cursor: pointer;
++  text-align: center;
++  touch-action: manipulation;
++  transition: background-color 0.15s, color 0.15s, border-color 0.15s;
++
++  &:hover {
++    background: rgba(239, 68, 68, 0.08);
++    color: #fca5a5;
++    border-color: #7f1d1d;
++  }
+ 
+-.form-section {
+-  padding: 20px;
++  &:focus-visible {
++    outline: none;
++    box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.25);
++  }
++}
++
++.tab-bar {
++  display: grid;
++  grid-template-columns: repeat(4, 1fr);
++  gap: 2px;
++  padding: 8px 12px 0;
++  background: #18181b;
+   border-bottom: 1px solid #27272a;
++  flex-shrink: 0;
++}
+ 
+-  fieldset {
+-    border: none;
+-    padding: 0;
+-    margin: 0 0 16px;
+-    display: flex;
+-    flex-direction: column;
+-    gap: 14px;
++.tab {
++  background: transparent;
++  color: #71717a;
++  border: none;
++  border-bottom: 2px solid transparent;
++  padding: 10px 8px;
++  font-size: 13px;
++  font-weight: 500;
++  font-family: inherit;
++  cursor: pointer;
++  touch-action: manipulation;
++  transition: color 0.15s, border-color 0.15s, background-color 0.15s;
++
++  &:hover { color: #a1a1aa; background: rgba(255, 255, 255, 0.02); }
++
++  &.active {
++    color: #f4f4f5;
++    border-bottom-color: #10b981;
+   }
++
++  &:focus-visible {
++    outline: none;
++    box-shadow: inset 0 0 0 2px rgba(16, 185, 129, 0.35);
++    border-radius: 4px 4px 0 0;
++  }
++}
++
++.tab-panel {
++  flex: 1;
++  overflow-y: auto;
++  overscroll-behavior: contain;
++}
++
++.form-section {
++  padding: 16px 20px;
++  display: flex;
++  flex-direction: column;
++  gap: 14px;
+ }
+ 
+ .section-title {
+   display: block;
+-  margin: 0 0 12px;
++  margin: 0 0 8px;
+   font-size: 11px;
+   font-weight: 600;
+   color: #52525b;
+@@ -129,18 +197,14 @@
+   letter-spacing: 0.08em;
+ }
+ 
+-legend.section-title {
+-  padding: 0;
+-  width: 100%;
+-}
+-
+ .field {
+   display: flex;
+   flex-direction: column;
+   gap: 6px;
++  min-width: 0;
+ 
+-  label {
+-    font-size: 13px;
++  label, .block-label {
++    font-size: 12px;
+     font-weight: 500;
+     color: #a1a1aa;
+   }
+@@ -150,31 +214,37 @@ legend.section-title {
+     border: 1px solid #3f3f46;
+     border-radius: 8px;
+     color: #f4f4f5;
+-    padding: 9px 12px;
+-    font-size: 14px;
++    padding: 8px 12px;
++    font-size: 13px;
+     font-family: inherit;
++    font-variant-numeric: tabular-nums;
+     width: 100%;
+-    min-height: 40px;
++    min-height: 36px;
+     transition: border-color 0.15s, box-shadow 0.15s;
+ 
+-    &:hover {
+-      border-color: #52525b;
+-    }
++    &::placeholder { color: #52525b; }
++
++    &:hover { border-color: #52525b; }
+ 
+     &:focus-visible {
+       outline: none;
+       border-color: #10b981;
+       box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+     }
+-
+   }
+ }
+ 
++.field-row {
++  display: grid;
++  grid-template-columns: 1fr 1fr;
++  gap: 10px;
++}
+ 
+ .actions {
+   display: flex;
+   flex-wrap: wrap;
+   gap: 8px;
++  margin-top: 4px;
+ }
+ 
+ .btn-primary {
+@@ -188,7 +258,8 @@ legend.section-title {
+   font-size: 13px;
+   font-family: inherit;
+   min-height: 38px;
+-  transition: background 0.15s, box-shadow 0.15s, transform 0.1s;
++  touch-action: manipulation;
++  transition: background-color 0.15s, box-shadow 0.15s, transform 0.1s;
+ 
+   &:hover { background: #059669; }
+   &:active { transform: scale(0.98); }
+@@ -209,7 +280,8 @@ legend.section-title {
+   font-size: 13px;
+   font-family: inherit;
+   min-height: 38px;
+-  transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.1s;
++  touch-action: manipulation;
++  transition: background-color 0.15s, color 0.15s, border-color 0.15s, transform 0.1s;
+ 
+   &:hover { background: #27272a; color: #f4f4f5; border-color: #52525b; }
+   &:active { transform: scale(0.98); }
+@@ -220,17 +292,46 @@ legend.section-title {
+   }
+ }
+ 
++.chip {
++  background: #27272a;
++  color: #d4d4d8;
++  border: 1px solid #3f3f46;
++  border-radius: 999px;
++  padding: 6px 12px;
++  font-size: 12px;
++  font-family: inherit;
++  cursor: pointer;
++  touch-action: manipulation;
++  transition: background-color 0.15s, color 0.15s, border-color 0.15s, transform 0.1s;
+ 
+-.mode-toggle {
+-  padding: 20px;
+-  border-bottom: 1px solid #27272a;
+-  display: flex;
+-  flex-direction: column;
++  &:hover {
++    background: #3f3f46;
++    color: #f4f4f5;
++    border-color: #52525b;
++  }
++  &:active { transform: scale(0.97); }
++
++  &:focus-visible {
++    outline: none;
++    box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.35);
++  }
++}
++
++.quick-picks {
++  margin-top: 4px;
++  padding-top: 12px;
++  border-top: 1px dashed #27272a;
++}
++
++.form-error {
++  color: #f87171;
++  font-size: 12px;
++  margin: 0;
+ }
+ 
+ .toggle-row {
+   display: flex;
+-  gap: 8px;
++  gap: 4px;
+   background: #09090b;
+   border: 1px solid #27272a;
+   border-radius: 10px;
+@@ -248,7 +349,8 @@ legend.section-title {
+   font-size: 13px;
+   font-family: inherit;
+   font-weight: 500;
+-  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
++  touch-action: manipulation;
++  transition: background-color 0.15s, color 0.15s, box-shadow 0.15s;
+ 
+   &:hover:not(.active) { color: #a1a1aa; }
+ 
+@@ -264,16 +366,37 @@ legend.section-title {
+   }
+ }
+ 
++.output-section {
++  gap: 16px;
++}
+ 
+ .json-section {
+   display: flex;
+   flex-direction: column;
+-  padding: 20px;
+-  border-bottom: 1px solid #27272a;
++}
++
++.json-display {
++  flex: 1;
++  max-height: 280px;
++  overflow: auto;
++  overscroll-behavior: contain;
++  background: #09090b;
++  border: 1px solid #27272a;
++  border-radius: 10px;
++  padding: 12px;
++  font-size: 11px;
++  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', monospace;
++  font-variant-numeric: tabular-nums;
++  color: #a1a1aa;
++  margin: 0;
++  white-space: pre-wrap;
++  word-break: break-word;
++  direction: ltr;
++  text-align: start;
++  line-height: 1.6;
+ }
+ 
+ .export-result-section {
+-  padding: 20px;
+   display: flex;
+   flex-direction: column;
+   gap: 10px;
+@@ -281,8 +404,11 @@ legend.section-title {
+ 
+ .result-media {
+   width: 100%;
++  height: auto;
++  aspect-ratio: 16 / 9;
+   border-radius: 8px;
+   display: block;
++  background: #09090b;
+ }
+ 
+ .result-download {
+@@ -291,20 +417,20 @@ legend.section-title {
+   text-decoration: none;
+ }
+ 
+-.json-display {
+-  flex: 1;
+-  overflow: auto;
+-  background: #09090b;
+-  border: 1px solid #27272a;
+-  border-radius: 10px;
+-  padding: 14px;
+-  font-size: 11px;
+-  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', monospace;
+-  color: #71717a;
+-  margin: 0;
+-  white-space: pre-wrap;
+-  word-break: break-all;
+-  direction: ltr;
+-  text-align: start;
+-  line-height: 1.6;
++@media (prefers-reduced-motion: reduce) {
++  .icon-btn,
++  .btn-primary,
++  .btn-secondary,
++  .btn-mode,
++  .chip,
++  .tab,
++  .btn-danger-text,
++  .field input {
++    transition: none;
++  }
++  .btn-primary:active,
++  .btn-secondary:active,
++  .chip:active {
++    transform: none;
++  }
+ }
+diff --git a/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.ts b/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.ts
+index e45d757..4099072 100644
+--- a/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.ts
++++ b/apps/iframe-demo/src/app/pages/editor-page/editor-page.component.ts
+@@ -19,6 +19,7 @@ import { ActivatedRoute } from "@angular/router";
+ import { filter } from "rxjs";
+ import { environment } from "../../../environments/environment";
+ import {
++	EDITOR_ADD_MEDIA,
+ 	EDITOR_ADD_PREVIEW_ITEM,
+ 	EDITOR_CLEAR_PROJECT,
+ 	EDITOR_READY,
+@@ -26,7 +27,7 @@ import {
+ 	type PreviewItemPayload,
+ 	type RecordingRangePayload,
+ } from "../../message-types";
+-import { EditorBridgeService } from "../../services/editor-bridge.service";
++import { type BridgeQueueItem, EditorBridgeService } from "../../services/editor-bridge.service";
+ 
+ const MIN_W = 320;
+ const MIN_H = 200;
+@@ -39,6 +40,15 @@ type ResizeDir = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
+ const DEMO_CHANNEL_ID = "demo-recording";
+ const DEMO_SEGMENT_START = 1778412270000;
+ 
++const PRESET_IDS: ReadonlyArray<{ id: string; label: string }> = [
++	{ id: "img-001", label: "img-001 · אדום" },
++	{ id: "img-002", label: "img-002 · ירוק" },
++	{ id: "img-003", label: "img-003 · כחול" },
++	{ id: "demo-clip-001", label: "demo-clip-001 · קליפ" },
++	{ id: "uploaded-001", label: "uploaded-001 · סרטון" },
++	{ id: "screenshot-001", label: "screenshot-001 · צילום" },
++];
++
+ @Component({
+ 	selector: "app-editor-page",
+ 	changeDetection: ChangeDetectionStrategy.OnPush,
+@@ -60,6 +70,12 @@ export class EditorPageComponent implements OnInit, OnDestroy {
+ 	readonly lastResponse = signal<EditorResponse | null>(null);
+ 	readonly outgoingPayload = signal<object | null>(null);
+ 
++	readonly mediaId = signal("img-001");
++	readonly mediaError = signal<string | null>(null);
++	readonly presetIds = PRESET_IDS;
++
++	readonly activeTab = signal<"recording" | "media" | "output">("media");
++
+ 	readonly editorUrl: Signal<SafeResourceUrl>;
+ 	readonly editorOrigin = new URL(environment.editorUrl).origin;
+ 
+@@ -100,7 +116,7 @@ export class EditorPageComponent implements OnInit, OnDestroy {
+ 			)
+ 			.subscribe((items) => {
+ 				this.bridge.drainQueue();
+-				for (const item of items) this.postItem(item);
++				for (const item of items) this.postBridgeItem(item);
+ 			});
+ 	}
+ 
+@@ -192,6 +208,22 @@ export class EditorPageComponent implements OnInit, OnDestroy {
+ 		this.postToEditor(msg);
+ 	}
+ 
++	addMediaFromForm(): void {
++		const id = this.mediaId().trim();
++		if (!id) {
++			this.mediaError.set("יש להזין מזהה מדיה");
++			return;
++		}
++		this.mediaError.set(null);
++		this.sendAddMedia(id);
++	}
++
++	addPresetMedia(id: string): void {
++		this.mediaError.set(null);
++		this.mediaId.set(id);
++		this.sendAddMedia(id);
++	}
++
+ 	readonly HANDLE = HANDLE;
+ 	readonly PANEL_W = PANEL_W;
+ 	readonly corners: ResizeDir[] = ["nw", "ne", "sw", "se"];
+@@ -257,7 +289,13 @@ export class EditorPageComponent implements OnInit, OnDestroy {
+ 		return JSON.stringify(v, null, 2);
+ 	}
+ 
+-	private postItem(item: PreviewItemPayload): void {
++	private sendAddMedia(mediaId: string): void {
++		const msg = { type: EDITOR_ADD_MEDIA, mediaId };
++		this.outgoingPayload.set(msg);
++		this.postToEditor(msg);
++	}
++
++	private postPreviewItem(item: PreviewItemPayload): void {
+ 		const msg = {
+ 			type: EDITOR_ADD_PREVIEW_ITEM,
+ 			requestId: crypto.randomUUID(),
+@@ -267,6 +305,14 @@ export class EditorPageComponent implements OnInit, OnDestroy {
+ 		this.postToEditor(msg);
+ 	}
+ 
++	private postBridgeItem(item: BridgeQueueItem): void {
++		if ("kind" in item && item.kind === "stored-media") {
++			this.sendAddMedia(item.mediaId);
++			return;
++		}
++		this.postPreviewItem(item as PreviewItemPayload);
++	}
++
+ 	private postToEditor(payload: object): void {
+ 		this.iframeRef().nativeElement.contentWindow?.postMessage(payload, this.editorOrigin);
+ 	}
+@@ -284,7 +330,7 @@ export class EditorPageComponent implements OnInit, OnDestroy {
+ 		if (data.type === EDITOR_READY) {
+ 			this.editorReady.set(true);
+ 			const pending = this.bridge.drainQueue();
+-			for (const item of pending) this.postItem(item);
++			for (const item of pending) this.postBridgeItem(item);
+ 			return;
+ 		}
+ 
+diff --git a/apps/iframe-demo/src/app/services/editor-bridge.service.ts b/apps/iframe-demo/src/app/services/editor-bridge.service.ts
+index 4c88663..1df80db 100644
+--- a/apps/iframe-demo/src/app/services/editor-bridge.service.ts
++++ b/apps/iframe-demo/src/app/services/editor-bridge.service.ts
+@@ -2,20 +2,22 @@ import { Injectable, signal } from "@angular/core";
+ import type {
+ 	AudioRangePayload,
+ 	EditorResponse,
+-	MediaPayload,
+ 	PreviewItemPayload,
+ 	RecordingRangePayload,
+ } from "../message-types";
+ 
++type StoredMediaRequest = { kind: "stored-media"; mediaId: string };
++export type BridgeQueueItem = PreviewItemPayload | StoredMediaRequest;
++
+ @Injectable({ providedIn: "root" })
+ export class EditorBridgeService {
+-	private readonly queue = signal<PreviewItemPayload[]>([]);
++	private readonly queue = signal<BridgeQueueItem[]>([]);
+ 	readonly pendingItems = this.queue.asReadonly();
+ 	readonly lastResponse = signal<EditorResponse | null>(null);
+ 	readonly fullMode = signal<boolean>(true);
+ 
+-	addMedia(payload: MediaPayload): void {
+-		this.queue.update((q) => [...q, payload]);
++	addStoredMedia(mediaId: string): void {
++		this.queue.update((q) => [...q, { kind: "stored-media", mediaId }]);
+ 	}
+ 
+ 	addAudio(payload: AudioRangePayload): void {
+@@ -26,7 +28,7 @@ export class EditorBridgeService {
+ 		this.queue.update((q) => [...q, payload]);
+ 	}
+ 
+-	drainQueue(): PreviewItemPayload[] {
++	drainQueue(): BridgeQueueItem[] {
+ 		const items = this.queue();
+ 		this.queue.set([]);
+ 		return items;
+diff --git a/apps/server/CLAUDE.md b/apps/server/CLAUDE.md
+index aadc1b9..3977603 100644
+--- a/apps/server/CLAUDE.md
++++ b/apps/server/CLAUDE.md
+@@ -94,10 +94,10 @@ FFmpeg source processors (HLS, DASH, image, audio): `src/infrastructure/ffmpeg/s
+ ### preview
+ | Method | Path | Description |
+ |--------|------|-------------|
+-| POST | `/editor/preview-source` | Generate preview from MPD/HLS source. Calls Core's `/private/channels/:id/play`, fetches the MPD from the returned URL with `vod-token`, builds an HLS playlist, stores it, returns the signed playlist URL |
+-| GET | `/editor/segment` | Proxy HLS segment — injects `vod-token` header into the upstream fetch (browsers cannot do it for HLS) |
++| POST | `/editor/preview-source` | Generate preview from a discriminated source (`GeneratePreviewSource` in `src/features/preview/application/use-cases/GeneratePreviewUseCase.ts`): `channel-range` → calls Core `/private/channels/:id/play`, fetches MPD with `vod-token`; `media-id` → calls Core `/private/videos/:id/play` (no `vod-token` minted — Core serves segments under the session `ztube-token` cookie), fetches MPD under cookie auth only. Both branches assemble an HLS playlist, store it, return the signed playlist URL |
++| GET | `/editor/segment` | Proxy HLS segment. URL carries a `srcKind` query (`channel-range` \| `media-id`) baked into the HMAC payload (`${url}\n${token}\n${srcKind}`) so the proxy knows whether to attach `vod-token` upstream — `media-id` segments are forwarded with cookies only |
+ 
+-Controller: `src/features/preview/adapters/inbound/http/preview.controller.ts`. Outbound adapter: `src/features/preview/adapters/outbound/http/HttpPreviewSourceAdapter.ts`. Same adapter is used against real Core/VOD and against `apps/core-mock`/`apps/mock-vod`. No demo branches.
++Controller: `src/features/preview/adapters/inbound/http/preview.controller.ts`. Outbound adapter: `src/features/preview/adapters/outbound/http/HttpPreviewSourceAdapter.ts` (`play()` for channel-range, `playMedia()` for media-id). Signing: `src/features/preview/application/services/url-signing.ts`. Same adapter is used against real Core/VOD and against `apps/core-mock`/`apps/mock-vod`. No demo branches.
+ 
+ ## Worker
+ 
+diff --git a/apps/server/src/features/preview/adapters/inbound/http/__tests__/preview.controller.e2e.test.ts b/apps/server/src/features/preview/adapters/inbound/http/__tests__/preview.controller.e2e.test.ts
+index 93d35cb..b23136f 100644
+--- a/apps/server/src/features/preview/adapters/inbound/http/__tests__/preview.controller.e2e.test.ts
++++ b/apps/server/src/features/preview/adapters/inbound/http/__tests__/preview.controller.e2e.test.ts
+@@ -119,6 +119,8 @@ describe("preview.controller E2E (fetch-stubbed)", () => {
+ 			.split("\n")
+ 			.find((l) => l.startsWith(`${SERVER_BASE}/editor/segment?url=`));
+ 		if (!segmentLine) throw new Error("segment line not found");
++		expect(segmentLine).toContain("&kind=channel-range");
++		expect(segmentLine).toContain("&token=");
+ 
+ 		const proxyPath = segmentLine.replace(SERVER_BASE, "");
+ 		const segRes = await server.inject({ method: "GET", url: proxyPath });
+@@ -126,6 +128,78 @@ describe("preview.controller E2E (fetch-stubbed)", () => {
+ 		expect(segRes.rawPayload.length).toBe(SEGMENT_BYTES.length);
+ 	});
+ 
++	it("media-id source: builds HLS via /videos/:id/play, signs without vod-token, proxy omits vod-token upstream", async () => {
++		const mediaCreatedAtMs = 1_700_000_000_000;
++		const durationMs = 15_000;
++		const mpdUrl = "http://core.example/private/storage/clip-001/mpd";
++		const upstreamSegHeaders: Record<string, string>[] = [];
++
++		fetchSpy.mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
++			const url = typeof input === "string" ? input : input.toString();
++			if (url === `${CORE_BASE}/videos/clip-001/play`) {
++				return new Response(
++					JSON.stringify({
++						url: mpdUrl,
++						timeRanges: [[mediaCreatedAtMs, mediaCreatedAtMs + durationMs]],
++					}),
++					{ status: 200, headers: { "content-type": "application/json" } },
++				);
++			}
++			if (url === mpdUrl) {
++				return new Response(FIXTURE_MPD, { status: 200 });
++			}
++			upstreamSegHeaders.push((init?.headers ?? {}) as Record<string, string>);
++			return new Response(SEGMENT_BYTES, {
++				status: 200,
++				headers: { "content-type": "video/mp4" },
++			});
++		});
++
++		const res = await server.inject({
++			method: "POST",
++			url: "/editor/preview-source",
++			payload: {
++				source: { type: "media-id", mediaId: "clip-001" },
++			},
++		});
++		expect(res.statusCode).toBe(200);
++		const body = JSON.parse(res.body) as {
++			type: string;
++			playlistUrl: string;
++			durationMs: number;
++			sourceOffsetMs: number;
++		};
++		expect(body.type).toBe("hls");
++		expect(body.durationMs).toBe(durationMs);
++		expect(body.sourceOffsetMs).toBe(0);
++
++		const key = body.playlistUrl.replace("internal://", "");
++		const playlist = storage.readText(key);
++		if (!playlist) throw new Error("playlist not stored");
++		const segmentLine = playlist
++			.split("\n")
++			.find((l) => l.startsWith(`${SERVER_BASE}/editor/segment?url=`));
++		if (!segmentLine) throw new Error("segment line not found");
++		expect(segmentLine).toContain("&kind=media-id");
++		expect(segmentLine).not.toContain("&token=");
++
++		const proxyPath = segmentLine.replace(SERVER_BASE, "");
++		const segRes = await server.inject({ method: "GET", url: proxyPath });
++		expect(segRes.statusCode).toBe(200);
++		expect(upstreamSegHeaders.length).toBe(1);
++		expect(upstreamSegHeaders[0]["vod-token"]).toBeUndefined();
++	});
++
++	it("media-id 404 from core → 400", async () => {
++		fetchSpy.mockImplementation(async () => new Response("{}", { status: 404 }));
++		const res = await server.inject({
++			method: "POST",
++			url: "/editor/preview-source",
++			payload: { source: { type: "media-id", mediaId: "bogus" } },
++		});
++		expect(res.statusCode).toBe(400);
++	});
++
+ 	it("range outside fixture window → 400 (adapter throws RangeError on core 404)", async () => {
+ 		fetchSpy.mockImplementation(async () => new Response(JSON.stringify({}), { status: 404 }));
+ 
+diff --git a/apps/server/src/features/preview/adapters/inbound/http/preview.controller.ts b/apps/server/src/features/preview/adapters/inbound/http/preview.controller.ts
+index 8b9dd6e..0238a1f 100644
+--- a/apps/server/src/features/preview/adapters/inbound/http/preview.controller.ts
++++ b/apps/server/src/features/preview/adapters/inbound/http/preview.controller.ts
+@@ -3,8 +3,11 @@ import type { FastifyPluginAsync } from "fastify";
+ import type { ApiEnvConfig } from "../../../../../config/env.ts";
+ import type { StoragePort } from "../../../../../shared/application/ports/outbound/StoragePort.ts";
+ import { HttpStatus } from "../../../../../shared/utils/http-status.ts";
+-import { verifyUrlSignature } from "../../../application/services/url-signing.ts";
+-import { GeneratePreviewUseCase } from "../../../application/use-cases/GeneratePreviewUseCase.ts";
++import { type SrcKind, verifyUrlSignature } from "../../../application/services/url-signing.ts";
++import {
++	type GeneratePreviewSource,
++	GeneratePreviewUseCase,
++} from "../../../application/use-cases/GeneratePreviewUseCase.ts";
+ import { HttpPreviewSourceAdapter } from "../../outbound/http/HttpPreviewSourceAdapter.ts";
+ 
+ interface ChannelRangeSource {
+@@ -14,8 +17,13 @@ interface ChannelRangeSource {
+ 	endTimeMs: number;
+ }
+ 
++interface MediaIdSource {
++	type: "media-id";
++	mediaId: string;
++}
++
+ interface PreviewSourceBody {
+-	source: ChannelRangeSource;
++	source: ChannelRangeSource | MediaIdSource;
+ }
+ 
+ interface PreviewControllerOptions {
+@@ -23,6 +31,26 @@ interface PreviewControllerOptions {
+ 	config: ApiEnvConfig;
+ }
+ 
++function parseZtubeTokenCookie(cookieHeader: string): string {
++	const cookieMatch = cookieHeader.match(/(?:^|;\s*)ztube-token=([^;]+)/);
++	if (!cookieMatch) return "";
++	try {
++		return decodeURIComponent(cookieMatch[1]);
++	} catch (err) {
++		if (err instanceof URIError) {
++			throw new HttpError({
++				statusCode: HttpStatus.BAD_REQUEST,
++				message: "Invalid ztube-token cookie",
++			});
++		}
++		throw err;
++	}
++}
++
++function isSrcKind(value: unknown): value is SrcKind {
++	return value === "channel-range" || value === "media-id";
++}
++
+ export const previewController: FastifyPluginAsync<PreviewControllerOptions> = async (
+ 	fastify,
+ 	opts,
+@@ -31,15 +59,29 @@ export const previewController: FastifyPluginAsync<PreviewControllerOptions> = a
+ 	const generatePreviewUseCase = new GeneratePreviewUseCase(storage, config);
+ 
+ 	fastify.get("/editor/segment", async (request, reply) => {
+-		const { url, token, sig } = request.query as {
++		const { url, token, sig, kind } = request.query as {
+ 			url?: string;
+ 			token?: string;
+ 			sig?: string;
++			kind?: string;
+ 		};
+-		if (!url || !token || !sig) {
++		if (!url || !sig || !kind) {
+ 			throw new HttpError({
+ 				statusCode: HttpStatus.BAD_REQUEST,
+-				message: "Missing url, token, or sig",
++				message: "Missing url, sig, or kind",
++			});
++		}
++		if (!isSrcKind(kind)) {
++			throw new HttpError({
++				statusCode: HttpStatus.BAD_REQUEST,
++				message: "Invalid kind",
++			});
++		}
++		const effectiveToken = token ?? "";
++		if (kind === "channel-range" && !effectiveToken) {
++			throw new HttpError({
++				statusCode: HttpStatus.BAD_REQUEST,
++				message: "Missing token for channel-range",
+ 			});
+ 		}
+ 
+@@ -69,39 +111,25 @@ export const previewController: FastifyPluginAsync<PreviewControllerOptions> = a
+ 			throw new HttpError({ statusCode: HttpStatus.BAD_REQUEST, message: "Invalid URL" });
+ 		}
+ 
+-		if (!verifyUrlSignature(config.PREVIEW_SIGNING_SECRET, decoded, token, sig)) {
++		if (!verifyUrlSignature(config.PREVIEW_SIGNING_SECRET, decoded, effectiveToken, kind, sig)) {
+ 			throw new HttpError({ statusCode: HttpStatus.FORBIDDEN, message: "Invalid signature" });
+ 		}
+ 
+-		const cookieHeader = request.headers.cookie ?? "";
+-		const cookieMatch = cookieHeader.match(/(?:^|;\s*)ztube-token=([^;]+)/);
+-		let ztubeToken = "";
+-		if (cookieMatch) {
+-			try {
+-				ztubeToken = decodeURIComponent(cookieMatch[1]);
+-			} catch (err) {
+-				if (err instanceof URIError) {
+-					throw new HttpError({
+-						statusCode: HttpStatus.BAD_REQUEST,
+-						message: "Invalid ztube-token cookie",
+-					});
+-				}
+-				throw err;
+-			}
+-		}
++		const ztubeToken = parseZtubeTokenCookie(request.headers.cookie ?? "");
+ 
+ 		const clientAbort = new AbortController();
+ 		const onAborted = () => clientAbort.abort();
+ 		request.raw.once("aborted", onAborted);
+ 		const upstreamSignal = AbortSignal.any([clientAbort.signal, AbortSignal.timeout(30_000)]);
+ 
++		const upstreamHeaders: Record<string, string> = {};
++		if (kind === "channel-range") upstreamHeaders["vod-token"] = effectiveToken;
++		if (ztubeToken) upstreamHeaders.Cookie = `ztube-token=${ztubeToken}`;
++
+ 		let upstream: Response;
+ 		try {
+ 			upstream = await fetch(decoded, {
+-				headers: {
+-					"vod-token": token,
+-					...(ztubeToken ? { Cookie: `ztube-token=${ztubeToken}` } : {}),
+-				},
++				headers: upstreamHeaders,
+ 				signal: upstreamSignal,
+ 			});
+ 		} catch (err) {
+@@ -130,47 +158,56 @@ export const previewController: FastifyPluginAsync<PreviewControllerOptions> = a
+ 
+ 	fastify.post<{ Body: PreviewSourceBody }>("/editor/preview-source", async (request, reply) => {
+ 		const body = request.body as PreviewSourceBody | null;
+-		if (!body?.source || body.source.type !== "channel-range") {
+-			throw new HttpError({
+-				statusCode: HttpStatus.BAD_REQUEST,
+-				message: "source.type must be channel-range",
+-			});
+-		}
+-		const { source } = body;
+-
+-		const { channelId, startTimeMs, endTimeMs } = source;
+-
+-		if (endTimeMs <= startTimeMs) {
++		const source = body?.source;
++		if (!source || (source.type !== "channel-range" && source.type !== "media-id")) {
+ 			throw new HttpError({
+ 				statusCode: HttpStatus.BAD_REQUEST,
+-				message: "endTimeMs must be greater than startTimeMs",
++				message: "source.type must be channel-range or media-id",
+ 			});
+ 		}
+ 
+-		const durationMs = endTimeMs - startTimeMs;
+-		if (durationMs > config.MAX_PREVIEW_DURATION_MS) {
+-			throw new HttpError({
+-				statusCode: HttpStatus.BAD_REQUEST,
+-				message: `Requested duration exceeds maximum of ${config.MAX_PREVIEW_DURATION_MS}ms`,
+-			});
+-		}
++		let useCaseSource: GeneratePreviewSource;
++		if (source.type === "channel-range") {
++			const { channelId, startTimeMs, endTimeMs } = source;
++			if (typeof channelId !== "string" || !channelId) {
++				throw new HttpError({
++					statusCode: HttpStatus.BAD_REQUEST,
++					message: "channelId is required",
++				});
++			}
++			if (typeof startTimeMs !== "number" || typeof endTimeMs !== "number") {
++				throw new HttpError({
++					statusCode: HttpStatus.BAD_REQUEST,
++					message: "startTimeMs and endTimeMs must be numbers",
++				});
++			}
++			if (endTimeMs <= startTimeMs) {
++				throw new HttpError({
++					statusCode: HttpStatus.BAD_REQUEST,
++					message: "endTimeMs must be greater than startTimeMs",
++				});
++			}
+ 
+-		const cookieHeader = request.headers.cookie ?? "";
+-		const cookieMatch = cookieHeader.match(/(?:^|;\s*)ztube-token=([^;]+)/);
+-		let ztubeToken = "";
+-		if (cookieMatch) {
+-			try {
+-				ztubeToken = decodeURIComponent(cookieMatch[1]);
+-			} catch (err) {
+-				if (err instanceof URIError) {
+-					throw new HttpError({
+-						statusCode: HttpStatus.BAD_REQUEST,
+-						message: "Invalid ztube-token cookie",
+-					});
+-				}
+-				throw err;
++			const durationMs = endTimeMs - startTimeMs;
++			if (durationMs > config.MAX_PREVIEW_DURATION_MS) {
++				throw new HttpError({
++					statusCode: HttpStatus.BAD_REQUEST,
++					message: `Requested duration exceeds maximum of ${config.MAX_PREVIEW_DURATION_MS}ms`,
++				});
+ 			}
++			useCaseSource = { type: "channel-range", channelId, startTimeMs, endTimeMs };
++		} else {
++			const { mediaId } = source;
++			if (typeof mediaId !== "string" || !mediaId) {
++				throw new HttpError({
++					statusCode: HttpStatus.BAD_REQUEST,
++					message: "mediaId is required",
++				});
++			}
++			useCaseSource = { type: "media-id", mediaId };
+ 		}
++
++		const ztubeToken = parseZtubeTokenCookie(request.headers.cookie ?? "");
+ 		const previewSource = new HttpPreviewSourceAdapter({
+ 			coreBaseUrl: config.CORE_BASE_URL,
+ 			serverBaseUrl: config.SERVER_BASE_URL,
+@@ -179,9 +216,7 @@ export const previewController: FastifyPluginAsync<PreviewControllerOptions> = a
+ 
+ 		try {
+ 			const result = await generatePreviewUseCase.execute({
+-				channelId,
+-				startTimeMs,
+-				endTimeMs,
++				source: useCaseSource,
+ 				previewSource,
+ 			});
+ 
+diff --git a/apps/server/src/features/preview/adapters/outbound/http/HttpPreviewSourceAdapter.ts b/apps/server/src/features/preview/adapters/outbound/http/HttpPreviewSourceAdapter.ts
+index 773e50b..850ee1c 100644
+--- a/apps/server/src/features/preview/adapters/outbound/http/HttpPreviewSourceAdapter.ts
++++ b/apps/server/src/features/preview/adapters/outbound/http/HttpPreviewSourceAdapter.ts
+@@ -1,4 +1,5 @@
+ import type {
++	MediaPlayResult,
+ 	PreviewPlayResult,
+ 	PreviewSourcePort,
+ } from "../../../application/ports/outbound/PreviewSourcePort.ts";
+@@ -9,6 +10,11 @@ interface ChannelPlayResponse {
+ 	token: string;
+ }
+ 
++interface VideoPlayResponse {
++	url: string;
++	timeRanges: number[][];
++}
++
+ const FETCH_TIMEOUT_MS = 10_000;
+ 
+ export class HttpPreviewSourceAdapter implements PreviewSourcePort {
+@@ -72,9 +78,57 @@ export class HttpPreviewSourceAdapter implements PreviewSourcePort {
+ 		};
+ 	}
+ 
+-	async fetchManifest(mpdUrl: string, token: string): Promise<string> {
++	async playMedia(mediaId: string): Promise<MediaPlayResult> {
++		const playUrl = `${this.coreBaseUrl}/videos/${encodeURIComponent(mediaId)}/play`;
++		const res = await fetch(playUrl, {
++			headers: this.cookieHeader(),
++			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
++		});
++		if (res.status === 404) {
++			throw new RangeError(`Video play API returned 404 for media ${mediaId}`);
++		}
++		if (!res.ok) {
++			throw new Error(`Video play API returned ${res.status} for media ${mediaId}`);
++		}
++		const play = (await res.json()) as VideoPlayResponse;
++
++		if (!Array.isArray(play.timeRanges) || play.timeRanges.length !== 1) {
++			throw new Error(
++				`multi-range videos not supported (got ${play.timeRanges?.length ?? 0} ranges)`,
++			);
++		}
++		const [range] = play.timeRanges;
++		if (
++			!Array.isArray(range) ||
++			range.length !== 2 ||
++			typeof range[0] !== "number" ||
++			typeof range[1] !== "number" ||
++			!Number.isFinite(range[0]) ||
++			!Number.isFinite(range[1])
++		) {
++			throw new Error("Video play API returned malformed timeRanges entry");
++		}
++		if (range[1] <= range[0]) {
++			throw new Error("Video play API timeRanges[0][1] must be > timeRanges[0][0]");
++		}
++		if (typeof play.url !== "string" || !play.url) {
++			throw new Error("Video play API returned no url");
++		}
++
++		const mpdUrl = new URL(play.url, this.serverBaseUrl).toString();
++
++		return {
++			mpdUrl,
++			mediaCreatedAtMs: range[0],
++			durationMs: range[1] - range[0],
++		};
++	}
++
++	async fetchManifest(mpdUrl: string, token?: string): Promise<string> {
++		const headers: Record<string, string> = { ...this.cookieHeader() };
++		if (token) headers["vod-token"] = token;
+ 		const res = await fetch(mpdUrl, {
+-			headers: { "vod-token": token, ...this.cookieHeader() },
++			headers,
+ 			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+ 		});
+ 		if (!res.ok) {
+diff --git a/apps/server/src/features/preview/adapters/outbound/http/__tests__/HttpPreviewSourceAdapter.test.ts b/apps/server/src/features/preview/adapters/outbound/http/__tests__/HttpPreviewSourceAdapter.test.ts
+index c2ba1d6..a9e6ced 100644
+--- a/apps/server/src/features/preview/adapters/outbound/http/__tests__/HttpPreviewSourceAdapter.test.ts
++++ b/apps/server/src/features/preview/adapters/outbound/http/__tests__/HttpPreviewSourceAdapter.test.ts
+@@ -148,6 +148,103 @@ describe("HttpPreviewSourceAdapter.play", () => {
+ 	});
+ });
+ 
++describe("HttpPreviewSourceAdapter.playMedia", () => {
++	let fetchSpy: FetchSpy;
++	beforeEach(() => {
++		fetchSpy = vi.fn();
++		vi.stubGlobal("fetch", fetchSpy);
++	});
++	afterEach(() => {
++		vi.unstubAllGlobals();
++	});
++
++	it("hits {coreBaseUrl}/videos/:id/play and maps timeRanges to mediaCreatedAtMs + durationMs", async () => {
++		const createdAt = 1_700_000_000_000;
++		const durationMs = 60_000;
++		fetchSpy.mockResolvedValueOnce(
++			jsonResponse({
++				url: "http://core/storage/clip-001/mpd",
++				timeRanges: [[createdAt, createdAt + durationMs]],
++			}),
++		);
++		const adapter = new HttpPreviewSourceAdapter({
++			coreBaseUrl: CORE,
++			serverBaseUrl: SERVER,
++		});
++		const out = await adapter.playMedia("clip-001");
++
++		expect(fetchSpy).toHaveBeenCalledTimes(1);
++		expect(fetchSpy.mock.calls[0][0]).toBe("https://core.example.com/private/videos/clip-001/play");
++		expect(out).toEqual({
++			mpdUrl: "http://core/storage/clip-001/mpd",
++			mediaCreatedAtMs: createdAt,
++			durationMs,
++		});
++	});
++
++	it("sends Cookie header (ztube-token) and no vod-token on /videos/:id/play", async () => {
++		fetchSpy.mockResolvedValueOnce(
++			jsonResponse({
++				url: "/storage/clip-001/mpd",
++				timeRanges: [[1, 2]],
++			}),
++		);
++		const adapter = new HttpPreviewSourceAdapter({
++			coreBaseUrl: CORE,
++			serverBaseUrl: SERVER,
++			authCookie: "abc",
++		});
++		await adapter.playMedia("clip-001");
++		const callOpts = fetchSpy.mock.calls[0][1] as { headers: Record<string, string> };
++		expect(callOpts.headers).toEqual({ Cookie: "ztube-token=abc" });
++		expect(callOpts.headers["vod-token"]).toBeUndefined();
++	});
++
++	it("throws RangeError on 404 (unknown media)", async () => {
++		fetchSpy.mockResolvedValueOnce(jsonResponse({}, 404));
++		const adapter = new HttpPreviewSourceAdapter({
++			coreBaseUrl: CORE,
++			serverBaseUrl: SERVER,
++		});
++		await expect(adapter.playMedia("bogus")).rejects.toBeInstanceOf(RangeError);
++	});
++
++	it("throws on non-2xx", async () => {
++		fetchSpy.mockResolvedValueOnce(jsonResponse({}, 500));
++		const adapter = new HttpPreviewSourceAdapter({
++			coreBaseUrl: CORE,
++			serverBaseUrl: SERVER,
++		});
++		await expect(adapter.playMedia("x")).rejects.toThrow(/500/);
++	});
++
++	it("throws on multi-range response", async () => {
++		fetchSpy.mockResolvedValueOnce(
++			jsonResponse({
++				url: "/x",
++				timeRanges: [
++					[0, 1],
++					[2, 3],
++				],
++			}),
++		);
++		const adapter = new HttpPreviewSourceAdapter({
++			coreBaseUrl: CORE,
++			serverBaseUrl: SERVER,
++		});
++		await expect(adapter.playMedia("x")).rejects.toThrow(/multi-range/);
++	});
++
++	it("throws when endMs <= startMs in timeRanges", async () => {
++		fetchSpy.mockResolvedValueOnce(jsonResponse({ url: "/x", timeRanges: [[1000, 1000]] }));
++		const adapter = new HttpPreviewSourceAdapter({
++			coreBaseUrl: CORE,
++			serverBaseUrl: SERVER,
++		});
++		await expect(adapter.playMedia("x")).rejects.toThrow(/timeRanges/);
++	});
++});
++
+ describe("HttpPreviewSourceAdapter.fetchManifest", () => {
+ 	let fetchSpy: FetchSpy;
+ 	beforeEach(() => {
+@@ -171,6 +268,19 @@ describe("HttpPreviewSourceAdapter.fetchManifest", () => {
+ 		expect(opts.headers).toEqual({ "vod-token": "tok" });
+ 	});
+ 
++	it("omits vod-token header when token is undefined (media-id source path)", async () => {
++		fetchSpy.mockResolvedValueOnce(textResponse("<MPD/>"));
++		const adapter = new HttpPreviewSourceAdapter({
++			coreBaseUrl: CORE,
++			serverBaseUrl: SERVER,
++			authCookie: "abc",
++		});
++		await adapter.fetchManifest("https://core/storage/clip-001/mpd");
++		const opts = fetchSpy.mock.calls[0][1] as { headers: Record<string, string> };
++		expect(opts.headers).toEqual({ Cookie: "ztube-token=abc" });
++		expect(opts.headers["vod-token"]).toBeUndefined();
++	});
++
+ 	it("forwards Core ztube-token cookie to VOD origin (shared auth boundary in prod)", async () => {
+ 		fetchSpy.mockResolvedValueOnce(textResponse("<MPD/>"));
+ 		const adapter = new HttpPreviewSourceAdapter({
+diff --git a/apps/server/src/features/preview/application/ports/outbound/PreviewSourcePort.ts b/apps/server/src/features/preview/application/ports/outbound/PreviewSourcePort.ts
+index 0798f6d..02df43e 100644
+--- a/apps/server/src/features/preview/application/ports/outbound/PreviewSourcePort.ts
++++ b/apps/server/src/features/preview/application/ports/outbound/PreviewSourcePort.ts
+@@ -7,7 +7,14 @@ export interface PreviewPlayResult {
+ 	token: string;
+ }
+ 
++export interface MediaPlayResult {
++	mpdUrl: string;
++	mediaCreatedAtMs: number;
++	durationMs: number;
++}
++
+ export interface PreviewSourcePort {
+ 	play(channelId: string, startTimeMs: number, endTimeMs: number): Promise<PreviewPlayResult>;
+-	fetchManifest(mpdUrl: string, token: string): Promise<string>;
++	playMedia(mediaId: string): Promise<MediaPlayResult>;
++	fetchManifest(mpdUrl: string, token?: string): Promise<string>;
+ }
+diff --git a/apps/server/src/features/preview/application/services/__tests__/url-signing.test.ts b/apps/server/src/features/preview/application/services/__tests__/url-signing.test.ts
+index 2e3b80d..82520f0 100644
+--- a/apps/server/src/features/preview/application/services/__tests__/url-signing.test.ts
++++ b/apps/server/src/features/preview/application/services/__tests__/url-signing.test.ts
+@@ -4,22 +4,42 @@ import { signUrl, verifyUrlSignature } from "../url-signing.ts";
+ const SECRET = "test-secret-for-url-signing-32characters";
+ 
+ describe("url-signing", () => {
+-	it("verifies a freshly signed (url, token) pair", () => {
+-		const sig = signUrl(SECRET, "https://vod/x.m4s", "tok-A");
+-		expect(verifyUrlSignature(SECRET, "https://vod/x.m4s", "tok-A", sig)).toBe(true);
++	it("verifies a freshly signed (url, token, srcKind=channel-range) tuple", () => {
++		const sig = signUrl(SECRET, "https://vod/x.m4s", "tok-A", "channel-range");
++		expect(verifyUrlSignature(SECRET, "https://vod/x.m4s", "tok-A", "channel-range", sig)).toBe(
++			true,
++		);
++	});
++
++	it("verifies a freshly signed media-id tuple (token may be empty)", () => {
++		const sig = signUrl(SECRET, "https://core/storage/abc/seg.m4s", "", "media-id");
++		expect(
++			verifyUrlSignature(SECRET, "https://core/storage/abc/seg.m4s", "", "media-id", sig),
++		).toBe(true);
++	});
++
++	it("rejects signature reuse across different srcKinds (binds kind to sig)", () => {
++		const sig = signUrl(SECRET, "https://vod/x.m4s", "tok-A", "channel-range");
++		expect(verifyUrlSignature(SECRET, "https://vod/x.m4s", "tok-A", "media-id", sig)).toBe(false);
+ 	});
+ 
+ 	it("rejects signature reuse across different tokens (binds token to sig)", () => {
+-		const sig = signUrl(SECRET, "https://vod/x.m4s", "tok-A");
+-		expect(verifyUrlSignature(SECRET, "https://vod/x.m4s", "tok-B", sig)).toBe(false);
++		const sig = signUrl(SECRET, "https://vod/x.m4s", "tok-A", "channel-range");
++		expect(verifyUrlSignature(SECRET, "https://vod/x.m4s", "tok-B", "channel-range", sig)).toBe(
++			false,
++		);
+ 	});
+ 
+ 	it("rejects signature reuse across different urls", () => {
+-		const sig = signUrl(SECRET, "https://vod/x.m4s", "tok-A");
+-		expect(verifyUrlSignature(SECRET, "https://vod/y.m4s", "tok-A", sig)).toBe(false);
++		const sig = signUrl(SECRET, "https://vod/x.m4s", "tok-A", "channel-range");
++		expect(verifyUrlSignature(SECRET, "https://vod/y.m4s", "tok-A", "channel-range", sig)).toBe(
++			false,
++		);
+ 	});
+ 
+ 	it("returns false for empty sig", () => {
+-		expect(verifyUrlSignature(SECRET, "https://vod/x.m4s", "tok-A", "")).toBe(false);
++		expect(verifyUrlSignature(SECRET, "https://vod/x.m4s", "tok-A", "channel-range", "")).toBe(
++			false,
++		);
+ 	});
+ });
+diff --git a/apps/server/src/features/preview/application/services/url-signing.ts b/apps/server/src/features/preview/application/services/url-signing.ts
+index 9d286a2..90f096e 100644
+--- a/apps/server/src/features/preview/application/services/url-signing.ts
++++ b/apps/server/src/features/preview/application/services/url-signing.ts
+@@ -1,17 +1,20 @@
+ import { createHmac, timingSafeEqual } from "node:crypto";
+ 
+-export function signUrl(secret: string, url: string, token: string): string {
+-	return createHmac("sha256", secret).update(`${url}\n${token}`).digest("base64url");
++export type SrcKind = "channel-range" | "media-id";
++
++export function signUrl(secret: string, url: string, token: string, srcKind: SrcKind): string {
++	return createHmac("sha256", secret).update(`${url}\n${token}\n${srcKind}`).digest("base64url");
+ }
+ 
+ export function verifyUrlSignature(
+ 	secret: string,
+ 	url: string,
+ 	token: string,
++	srcKind: SrcKind,
+ 	sig: string,
+ ): boolean {
+ 	if (!sig) return false;
+-	const expected = signUrl(secret, url, token);
++	const expected = signUrl(secret, url, token, srcKind);
+ 	const a = Buffer.from(expected);
+ 	const b = Buffer.from(sig);
+ 	if (a.length !== b.length) return false;
+diff --git a/apps/server/src/features/preview/application/use-cases/GeneratePreviewUseCase.ts b/apps/server/src/features/preview/application/use-cases/GeneratePreviewUseCase.ts
+index df4bf88..062b678 100644
+--- a/apps/server/src/features/preview/application/use-cases/GeneratePreviewUseCase.ts
++++ b/apps/server/src/features/preview/application/use-cases/GeneratePreviewUseCase.ts
+@@ -3,30 +3,45 @@ import type { StoragePort } from "../../../../shared/application/ports/outbound/
+ import type { PreviewSourcePort } from "../ports/outbound/PreviewSourcePort.ts";
+ import { generateHlsPlaylist } from "../services/mpd-to-hls.service.ts";
+ import { storePreviewPlaylist } from "../services/preview-job.service.ts";
+-import { signUrl } from "../services/url-signing.ts";
++import { type SrcKind, signUrl } from "../services/url-signing.ts";
++
++export type GeneratePreviewSource =
++	| {
++			type: "channel-range";
++			channelId: string;
++			startTimeMs: number;
++			endTimeMs: number;
++	  }
++	| {
++			type: "media-id";
++			mediaId: string;
++	  };
+ 
+ export interface GeneratePreviewInput {
+-	channelId: string;
+-	startTimeMs: number;
+-	endTimeMs: number;
++	source: GeneratePreviewSource;
+ 	previewSource: PreviewSourcePort;
+ }
+ 
+ export interface GeneratePreviewOutput {
+ 	playlistUrl: string;
+-	channelId: string;
+-	requestedStartMs: number;
+-	requestedEndMs: number;
+ 	durationMs: number;
+ 	sourceOffsetMs: number;
+ 	width: number;
+ 	height: number;
++	mediaCreatedAtMs?: number;
+ }
+ 
+-function buildProxyUrl(secret: string, proxyBase: string, token: string, target: string): string {
++function buildProxyUrl(
++	secret: string,
++	proxyBase: string,
++	token: string,
++	target: string,
++	srcKind: SrcKind,
++): string {
+ 	const encoded = Buffer.from(target, "utf8").toString("base64url");
+-	const sig = signUrl(secret, target, token);
+-	return `${proxyBase}?url=${encoded}&token=${encodeURIComponent(token)}&sig=${sig}`;
++	const sig = signUrl(secret, target, token, srcKind);
++	const tokenParam = token ? `&token=${encodeURIComponent(token)}` : "";
++	return `${proxyBase}?url=${encoded}&kind=${srcKind}${tokenParam}&sig=${sig}`;
+ }
+ 
+ function rewritePlaylistToProxy(
+@@ -34,16 +49,17 @@ function rewritePlaylistToProxy(
+ 	token: string,
+ 	proxyBase: string,
+ 	secret: string,
++	srcKind: SrcKind,
+ ): string {
+ 	return playlist
+ 		.split("\n")
+ 		.map((line) => {
+ 			if (line.startsWith("http://") || line.startsWith("https://")) {
+-				return buildProxyUrl(secret, proxyBase, token, line);
++				return buildProxyUrl(secret, proxyBase, token, line, srcKind);
+ 			}
+ 			const mapMatch = line.match(/^#EXT-X-MAP:URI="(https?:\/\/[^"]+)"$/);
+ 			if (mapMatch) {
+-				const proxied = buildProxyUrl(secret, proxyBase, token, mapMatch[1]);
++				const proxied = buildProxyUrl(secret, proxyBase, token, mapMatch[1], srcKind);
+ 				return `#EXT-X-MAP:URI="${proxied}"`;
+ 			}
+ 			return line;
+@@ -61,34 +77,81 @@ export class GeneratePreviewUseCase {
+ 	}
+ 
+ 	async execute(input: GeneratePreviewInput): Promise<GeneratePreviewOutput> {
+-		const { channelId, startTimeMs, endTimeMs, previewSource } = input;
++		const { source, previewSource } = input;
+ 
+-		const { mpdUrl, token, segmentStartTimeMs } = await previewSource.play(
+-			channelId,
+-			startTimeMs,
+-			endTimeMs,
+-		);
+-		const mpdXml = await previewSource.fetchManifest(mpdUrl, token);
++		const proxyBase = `${this.config.SERVER_BASE_URL}${this.config.SERVER_PUBLIC_PATH_PREFIX}/editor/segment`;
++
++		if (source.type === "channel-range") {
++			const { mpdUrl, token, segmentStartTimeMs } = await previewSource.play(
++				source.channelId,
++				source.startTimeMs,
++				source.endTimeMs,
++			);
++			const mpdXml = await previewSource.fetchManifest(mpdUrl, token);
++
++			const {
++				playlist: rawPlaylist,
++				sourceOffsetMs,
++				width,
++				height,
++			} = generateHlsPlaylist({
++				mpdXml,
++				mpdUrl,
++				segmentStartTimeMs,
++				requestedStartMs: source.startTimeMs,
++				requestedEndMs: source.endTimeMs,
++				maxDurationMs: this.config.MAX_PREVIEW_DURATION_MS,
++			});
++
++			const playlist = rewritePlaylistToProxy(
++				rawPlaylist,
++				token,
++				proxyBase,
++				this.config.PREVIEW_SIGNING_SECRET,
++				"channel-range",
++			);
++
++			const { playlistUrl } = await storePreviewPlaylist(
++				playlist,
++				this.config.S3_PREVIEW_PREFIX,
++				this.storage,
++				this.config.PREVIEW_JOB_TTL_SECONDS,
++			);
++
++			return {
++				playlistUrl,
++				durationMs: source.endTimeMs - source.startTimeMs,
++				sourceOffsetMs,
++				width,
++				height,
++			};
++		}
++
++		// source.type === "media-id"
++		const { mpdUrl, mediaCreatedAtMs, durationMs } = await previewSource.playMedia(source.mediaId);
++		const mpdXml = await previewSource.fetchManifest(mpdUrl);
+ 
++		const requestedStartMs = mediaCreatedAtMs;
++		const requestedEndMs = mediaCreatedAtMs + durationMs;
+ 		const {
+ 			playlist: rawPlaylist,
+-			sourceOffsetMs,
+ 			width,
+ 			height,
+ 		} = generateHlsPlaylist({
+ 			mpdXml,
+ 			mpdUrl,
+-			segmentStartTimeMs,
+-			requestedStartMs: startTimeMs,
+-			requestedEndMs: endTimeMs,
++			segmentStartTimeMs: mediaCreatedAtMs,
++			requestedStartMs,
++			requestedEndMs,
+ 			maxDurationMs: this.config.MAX_PREVIEW_DURATION_MS,
+ 		});
+ 
+ 		const playlist = rewritePlaylistToProxy(
+ 			rawPlaylist,
+-			token,
+-			`${this.config.SERVER_BASE_URL}${this.config.SERVER_PUBLIC_PATH_PREFIX}/editor/segment`,
++			"",
++			proxyBase,
+ 			this.config.PREVIEW_SIGNING_SECRET,
++			"media-id",
+ 		);
+ 
+ 		const { playlistUrl } = await storePreviewPlaylist(
+@@ -100,13 +163,11 @@ export class GeneratePreviewUseCase {
+ 
+ 		return {
+ 			playlistUrl,
+-			channelId,
+-			requestedStartMs: startTimeMs,
+-			requestedEndMs: endTimeMs,
+-			durationMs: endTimeMs - startTimeMs,
+-			sourceOffsetMs,
++			durationMs,
++			sourceOffsetMs: 0,
+ 			width,
+ 			height,
++			mediaCreatedAtMs,
+ 		};
+ 	}
+ }
+diff --git a/apps/server/src/features/preview/application/use-cases/__tests__/GeneratePreviewUseCase.test.ts b/apps/server/src/features/preview/application/use-cases/__tests__/GeneratePreviewUseCase.test.ts
+index 0d309d5..3724ec3 100644
+--- a/apps/server/src/features/preview/application/use-cases/__tests__/GeneratePreviewUseCase.test.ts
++++ b/apps/server/src/features/preview/application/use-cases/__tests__/GeneratePreviewUseCase.test.ts
+@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
+ import type { ApiEnvConfig } from "../../../../../config/env.ts";
+ import { InMemoryStorageAdapter } from "../../../../../infrastructure/storage/__tests__/InMemoryStorageAdapter.ts";
+ import type {
++	MediaPlayResult,
+ 	PreviewPlayResult,
+ 	PreviewSourcePort,
+ } from "../../ports/outbound/PreviewSourcePort.ts";
+@@ -35,14 +36,19 @@ function makeConfig(): ApiEnvConfig {
+ 	} as unknown as ApiEnvConfig;
+ }
+ 
+-function makePreviewSource(): PreviewSourcePort & {
++type SpyableSource = PreviewSourcePort & {
+ 	playCalls: Array<{ channelId: string; start: number; end: number }>;
+-	fetchCalls: Array<{ mpdUrl: string; token: string }>;
+-} {
+-	const playCalls: Array<{ channelId: string; start: number; end: number }> = [];
+-	const fetchCalls: Array<{ mpdUrl: string; token: string }> = [];
++	playMediaCalls: string[];
++	fetchCalls: Array<{ mpdUrl: string; token: string | undefined }>;
++};
++
++function makePreviewSource(): SpyableSource {
++	const playCalls: SpyableSource["playCalls"] = [];
++	const playMediaCalls: string[] = [];
++	const fetchCalls: SpyableSource["fetchCalls"] = [];
+ 	return {
+ 		playCalls,
++		playMediaCalls,
+ 		fetchCalls,
+ 		async play(channelId, start, end): Promise<PreviewPlayResult> {
+ 			playCalls.push({ channelId, start, end });
+@@ -52,6 +58,14 @@ function makePreviewSource(): PreviewSourcePort & {
+ 				segmentStartTimeMs: SEG_START,
+ 			};
+ 		},
++		async playMedia(mediaId): Promise<MediaPlayResult> {
++			playMediaCalls.push(mediaId);
++			return {
++				mpdUrl: "http://core.example/private/storage/clip-001/mpd",
++				mediaCreatedAtMs: SEG_START,
++				durationMs: 15_000,
++			};
++		},
+ 		async fetchManifest(mpdUrl, token) {
+ 			fetchCalls.push({ mpdUrl, token });
+ 			return FIXTURE_MPD;
+@@ -59,16 +73,19 @@ function makePreviewSource(): PreviewSourcePort & {
+ 	};
+ }
+ 
+-describe("GeneratePreviewUseCase", () => {
++describe("GeneratePreviewUseCase channel-range", () => {
+ 	it("orchestrates play → fetchManifest → mpd-to-hls → proxy-rewrite → store", async () => {
+ 		const storage = new InMemoryStorageAdapter();
+ 		const previewSource = makePreviewSource();
+ 		const uc = new GeneratePreviewUseCase(storage, makeConfig());
+ 
+ 		const out = await uc.execute({
+-			channelId: "ch-001",
+-			startTimeMs: SEG_START,
+-			endTimeMs: SEG_START + 15_000,
++			source: {
++				type: "channel-range",
++				channelId: "ch-001",
++				startTimeMs: SEG_START,
++				endTimeMs: SEG_START + 15_000,
++			},
+ 			previewSource,
+ 		});
+ 
+@@ -89,9 +106,38 @@ describe("GeneratePreviewUseCase", () => {
+ 		const playlist = stored[0][1].body.toString("utf8");
+ 		expect(playlist).toContain("http://server.local/editor/segment?url=");
+ 		expect(playlist).toContain("token=vod-token-xyz");
+-		// Original segment URL base64url-encoded
++		expect(playlist).toContain("kind=channel-range");
+ 		const expectedDecoded = "http://mock-vod/vod/demo-recording/media/segment_v4_2362.m4s";
+ 		const expectedEncoded = Buffer.from(expectedDecoded, "utf8").toString("base64url");
+ 		expect(playlist).toContain(expectedEncoded);
+ 	});
+ });
++
++describe("GeneratePreviewUseCase media-id", () => {
++	it("orchestrates playMedia → fetchManifest (no token) → mpd-to-hls → proxy-rewrite (kind=media-id, no token) → store", async () => {
++		const storage = new InMemoryStorageAdapter();
++		const previewSource = makePreviewSource();
++		const uc = new GeneratePreviewUseCase(storage, makeConfig());
++
++		const out = await uc.execute({
++			source: { type: "media-id", mediaId: "clip-001" },
++			previewSource,
++		});
++
++		expect(previewSource.playMediaCalls).toEqual(["clip-001"]);
++		expect(previewSource.fetchCalls).toEqual([
++			{ mpdUrl: "http://core.example/private/storage/clip-001/mpd", token: undefined },
++		]);
++
++		expect(out.durationMs).toBe(15_000);
++		expect(out.sourceOffsetMs).toBe(0);
++		expect(out.mediaCreatedAtMs).toBe(SEG_START);
++		expect(out.playlistUrl).toMatch(/^internal:\/\/preview\//);
++
++		const stored = Array.from(storage.objects.entries());
++		const playlist = stored[0][1].body.toString("utf8");
++		expect(playlist).toContain("http://server.local/editor/segment?url=");
++		expect(playlist).toContain("kind=media-id");
++		expect(playlist).not.toContain("token=");
++	});
++});
+diff --git a/docs/adr/0007-stored-media-id-only-intake.md b/docs/adr/0007-stored-media-id-only-intake.md
+new file mode 100644
+index 0000000..4f47b66
+--- /dev/null
++++ b/docs/adr/0007-stored-media-id-only-intake.md
+@@ -0,0 +1,49 @@
++# ADR 0007 — Stored-media intake is id-only; editor probes Core
++
++## Status
++
++Accepted — 2026-06-14.
++
++## Context
++
++The parent app (Angular host) drops a stored media item — image, screenshot, clip, or uploaded video — into the embedded editor by posting an `EDITOR_ADD_PREVIEW_ITEM` message. Before this change the contract carried two distinct payload kinds:
++
++- `kind: "image"` — `{ imageId }` plus optional `durationMs` / `name`.
++- `kind: "media"` — `{ mediaId, playback: { kind: "mp4" | "hls", src }, durationMs?, posterSrc?, name? }`.
++
++Two payload shapes meant two intake code paths in `payload-intake.ts`, two iframe-demo forms, and an asymmetry: image was id-only and the editor knew how to build the URL, but video required the parent to pre-resolve playback URLs and forward the credential. The parent team asked for full id-only intake — send a `mediaId`, the editor figures out the rest. Trims, names, and overrides are edited inside the iframe after the item lands.
++
++## Decision
++
++A new top-level postMessage type **`EDITOR_ADD_MEDIA { mediaId }`** replaces both `image` and `media` payloads. `EDITOR_ADD_PREVIEW_ITEM` keeps `recording-range` and `audio-range` (those carry time-window fields with no id-only equivalent).
++
++The editor resolves intent by calling Core's existing **`GET /private/media/{id}/watch`** → `{ type, name }`. `type ∈ "Image" | "ClipVideo" | "UploadedVideo" | "ScreenShotFromLive"`. Then:
++
++- `Image` / `ScreenShotFromLive` → editor builds `${VITE_CORE_EXTENSION}/storage/{id}/image`, dispatches `ADD_IMAGE` with default 5000 ms.
++- `ClipVideo` / `UploadedVideo` → editor backend resolves playback via a new preview-source variant `{ type: "media-id", mediaId }`. Backend calls `GET /private/videos/{id}/play` → `{ url, timeRanges }`, fetches MPD from `url`, assembles HLS, returns `{ playlistUrl, durationMs, sourceOffsetMs: 0, width, height }`. Editor dispatches `ADD_VIDEO`.
++
++`timeRanges[0][0]` is the wall-clock anchor at media creation. `durationMs = timeRanges[0][1] - timeRanges[0][0]`. The HLS pipeline downstream is unchanged.
++
++Editor responses echo `mediaId` on `EDITOR_PREVIEW_ITEM_ADDED { mediaId, itemId }` and `EDITOR_PREVIEW_ITEM_REJECTED { mediaId, reason }`. Recording-range / audio-range replies still use `requestId` — two correlation patterns coexist intentionally.
++
++Core 404 → `reason: "media not found"`. 5xx / network → `reason: "core unavailable"`. No retry, no placeholder, no fallback.
++
++`vod-token` is **not** issued for media-id sources. Core serves segments directly under the session `ztube-token` cookie. The editor backend's segment-proxy signs URLs with a `kind` discriminator (`channel-range` or `media-id`) baked into the HMAC payload (`${url}\n${token}\n${kind}`) and the URL query, so the proxy knows whether to attach `vod-token` upstream.
++
++`@video-editor/contract` is bumped from `0.1.0` → `0.2.0`. `imagePayloadSchema`, `mediaPayloadSchema`, `mediaPlaybackSchema` are removed from the from-parent union.
++
++## Alternatives Considered
++
++1. **Parent passes the type alongside the id.** Rejected — re-introduces parent-side knowledge of stored-media taxonomy. The parent team explicitly wanted to push that detail into the editor. Also fragile when Core adds new types — parent has to ship a release.
++2. **Naming convention (id prefix encodes type).** Rejected — Core ids are opaque uuids in production. Reserving prefixes leaks the editor's branching logic into the data layer and breaks if Core ever changes id format.
++3. **Keep `EDITOR_ADD_PREVIEW_ITEM` and add `kind: "stored-media"`.** Rejected — same correlation surface (`requestId`) implies same caching behaviour, but ids without a requestId are the natural correlation key and the round-trip to Core makes the call genuinely async. Splitting message types makes the asymmetry visible in the contract.
++4. **Reuse `vod-token` infrastructure for media-id segments.** Rejected — Core serves these segments directly (no separate VOD origin). Minting and validating a token nobody needs is a fake security boundary; the session cookie already authenticates.
++
++## Consequences
++
++- **Contract major break.** Parents on `0.1.0` will fail Zod parse on `image` / `media` payloads. Coordinated rollout required.
++- **Async ack on stored-media.** Where `image` previously acked synchronously (no network), every `EDITOR_ADD_MEDIA` now round-trips to Core. Parents that assumed sync ack must adapt.
++- **In-flight signed segment URLs invalidate** when this change ships. The HMAC payload format changed (added `srcKind`), so any playlist generated before deploy with an open browser tab afterward 403s on segment fetch until the playlist is regenerated. Acceptable — preview playlists are session-scoped and refresh on reload.
++- **Editor depends on Core for every stored-media drop.** Core unavailability surfaces as `EDITOR_PREVIEW_ITEM_REJECTED reason: "core unavailable"` on every add — there is no client-side cache, no retry. Operationally fine because Core is already in the critical path for any preview the editor renders.
++- **Two correlation patterns in one message stream.** `requestId` (legacy preview items) and `mediaId` (stored media) coexist on response envelopes. Documented in `apps/frontend/CLAUDE.md` and `packages/contract/CLAUDE.md`.
++- **iframe-demo simplifies** from two tabs (image, media) to one (media) with a single text input and preset chips matching every core-mock fixture id.
+diff --git a/knip.json b/knip.json
+index baebd27..d0847a1 100644
+--- a/knip.json
++++ b/knip.json
+@@ -14,7 +14,6 @@
+       "project": ["src/**/*.{ts,tsx}"]
+     },
+     "apps/server": {
+-      "entry": ["src/worker.ts"],
+       "project": ["src/**/*.ts"]
+     },
+     "apps/iframe-demo": {
+diff --git a/packages/contract/CLAUDE.md b/packages/contract/CLAUDE.md
+index 8c4d871..1a4fd5f 100644
+--- a/packages/contract/CLAUDE.md
++++ b/packages/contract/CLAUDE.md
+@@ -6,6 +6,8 @@
+ 
+ Published as `@video-editor/contract`. Four subpath buckets — no root barrel, no separate `mocks` exports.
+ 
++**Current major:** `0.2.0`. Bumped from `0.1.0` when the iframe parent → editor union dropped `imagePayloadSchema` + `mediaPayloadSchema` in favor of a top-level `EDITOR_ADD_MEDIA` message — see `docs/adr/0007-stored-media-id-only-intake.md`. Stored-media replies echo `mediaId`; recording-range / audio-range replies still use `requestId`. Two correlation patterns coexist.
++
+ | Subpath | Purpose | Audience |
+ |---|---|---|
+ | `./iframe/from-parent` | Parent → editor postMessage | Parent team + editor frontend |
+diff --git a/packages/contract/README.md b/packages/contract/README.md
+index 9023fca..85246a5 100644
+--- a/packages/contract/README.md
++++ b/packages/contract/README.md
+@@ -27,13 +27,16 @@ There is no root `@video-editor/contract` export. Every caller imports a subpath
+ Parent page                       Editor iframe (at /editor/embed)
+ ─────────────────────────────────────────────────────────────────
+                                   ──EDITOR_READY──────────────────▶
+-◀── EDITOR_ADD_PREVIEW_ITEM ──────
++◀── EDITOR_ADD_PREVIEW_ITEM ──────                     (requestId)
++◀── EDITOR_ADD_MEDIA ─────────────                     (mediaId)
+          ─────────────── EDITOR_PREVIEW_ITEM_ADDED / EDITOR_PREVIEW_ITEM_REJECTED ──▶
+ ◀── EDITOR_CLEAR_PROJECT ─────────
+          ─────────────────────────────────── EDITOR_PROJECT_CLEARED ──▶
+          ────────────────────────────────────── EDITOR_MEDIA_SAVED ──▶
+ ```
+ 
++Two correlation patterns coexist on the response stream: `EDITOR_ADD_PREVIEW_ITEM` / `EDITOR_CLEAR_PROJECT` replies echo the inbound `requestId` (optional, response cache de-duplicates by it); `EDITOR_ADD_MEDIA` replies echo `mediaId` with no de-duplication (two adds with the same id are processed twice). See [`docs/adr/0007-stored-media-id-only-intake.md`](../../docs/adr/0007-stored-media-id-only-intake.md) for the rationale.
++
+ ### Validate incoming messages (parent → editor)
+ 
+ ```ts
+@@ -57,16 +60,19 @@ import {
+ window.parent.postMessage(createPreviewItemAddedMessage(itemId), targetOrigin);
+ ```
+ 
+-### `PreviewItemPayload` (inbound)
++### `PreviewItemPayload` (inbound — `EDITOR_ADD_PREVIEW_ITEM`)
+ 
+ Discriminated union on `kind`:
+ 
+ | `kind` | Description |
+ |---|---|
+ | `recording-range` | A recording segment with a time range |
+-| `media` | A generic media asset |
+ | `audio-range` | An audio segment with a time range |
+ 
++### `EDITOR_ADD_MEDIA` (inbound — separate message type)
++
++`{ mediaId: string }`. Stored-media id-only intake: the editor resolves type by calling Core `GET /private/media/{id}/watch`, then routes images/screenshots to `ADD_IMAGE` directly and clips/uploaded videos through the editor backend's `media-id` preview source. Replies echo `mediaId` instead of `requestId`. See [`docs/adr/0007-stored-media-id-only-intake.md`](../../docs/adr/0007-stored-media-id-only-intake.md).
++
+ ## Events
+ 
+ Single topic exchange `video-editor`. Three routing keys:
+diff --git a/packages/contract/package.json b/packages/contract/package.json
+index 3055a07..bfb6613 100644
+--- a/packages/contract/package.json
++++ b/packages/contract/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@video-editor/contract",
+-	"version": "0.1.0",
++	"version": "0.2.0",
+ 	"private": true,
+ 	"type": "module",
+ 	"exports": {
+diff --git a/packages/contract/src/iframe/from-parent/__tests__/helpers.test.ts b/packages/contract/src/iframe/from-parent/__tests__/helpers.test.ts
+index 491e461..6e017b0 100644
+--- a/packages/contract/src/iframe/from-parent/__tests__/helpers.test.ts
++++ b/packages/contract/src/iframe/from-parent/__tests__/helpers.test.ts
+@@ -3,10 +3,9 @@ import { describe, it } from "node:test";
+ import { z } from "zod";
+ import { isParentToEditorMessage, parseParentToEditorMessage } from "../helpers.js";
+ import {
++	mockAddMediaMessage,
+ 	mockAudioRangeMessage,
+ 	mockClearProjectMessage,
+-	mockMediaHlsMessage,
+-	mockMediaMp4Message,
+ 	mockRecordingRangeHlsMessage,
+ 	mockRecordingRangeNoPlaybackMessage,
+ } from "../mocks.js";
+@@ -16,9 +15,8 @@ describe("isParentToEditorMessage", () => {
+ 		for (const m of [
+ 			mockRecordingRangeHlsMessage,
+ 			mockRecordingRangeNoPlaybackMessage,
+-			mockMediaMp4Message,
+-			mockMediaHlsMessage,
+ 			mockAudioRangeMessage,
++			mockAddMediaMessage,
+ 			mockClearProjectMessage,
+ 		]) {
+ 			assert.equal(isParentToEditorMessage(m), true);
+diff --git a/packages/contract/src/iframe/from-parent/__tests__/schemas.test.ts b/packages/contract/src/iframe/from-parent/__tests__/schemas.test.ts
+index cf68509..e1dc8a8 100644
+--- a/packages/contract/src/iframe/from-parent/__tests__/schemas.test.ts
++++ b/packages/contract/src/iframe/from-parent/__tests__/schemas.test.ts
+@@ -1,10 +1,9 @@
+ import assert from "node:assert/strict";
+ import { describe, it } from "node:test";
+ import {
++	mockAddMediaMessage,
+ 	mockAudioRangeMessage,
+ 	mockClearProjectMessage,
+-	mockMediaHlsMessage,
+-	mockMediaMp4Message,
+ 	mockRecordingRangeHlsMessage,
+ 	mockRecordingRangeNoPlaybackMessage,
+ } from "../mocks.js";
+@@ -42,18 +41,6 @@ describe("from-parent — business rules", () => {
+ 		assert.equal(result.success, false);
+ 	});
+ 
+-	it("rejects non-http/https src in media playback", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				kind: "media",
+-				mediaId: "m-1",
+-				playback: { kind: "mp4", src: "javascript:alert(1)" },
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+ 	it("rejects recording-range durationMs exceeding 1 hour", () => {
+ 		const result = parentToEditorMessageSchema.safeParse({
+ 			type: "EDITOR_ADD_PREVIEW_ITEM",
+@@ -89,19 +76,6 @@ describe("from-parent — business rules", () => {
+ 		assert.equal(result.success, false);
+ 	});
+ 
+-	it("rejects media durationMs exceeding 1 hour", () => {
+-		const result = parentToEditorMessageSchema.safeParse({
+-			type: "EDITOR_ADD_PREVIEW_ITEM",
+-			payload: {
+-				kind: "media",
+-				mediaId: "m-1",
+-				durationMs: MAX_MS + 1,
+-				playback: { kind: "mp4", src: "https://example.com/v.mp4" },
+-			},
+-		});
+-		assert.equal(result.success, false);
+-	});
+-
+ 	it("rejects audio-range with non-hls src that is not audio media", () => {
+ 		const result = parentToEditorMessageSchema.safeParse({
+ 			type: "EDITOR_ADD_PREVIEW_ITEM",
+@@ -128,8 +102,6 @@ describe("from-parent — business rules", () => {
+ describe("from-parent — schema invariants", () => {
+ 	it("parses valid add-preview-item messages", () => {
+ 		assert.equal(parentToEditorMessageSchema.safeParse(mockRecordingRangeHlsMessage).success, true);
+-		assert.equal(parentToEditorMessageSchema.safeParse(mockMediaMp4Message).success, true);
+-		assert.equal(parentToEditorMessageSchema.safeParse(mockMediaHlsMessage).success, true);
+ 		assert.equal(parentToEditorMessageSchema.safeParse(mockAudioRangeMessage).success, true);
+ 	});
+ 
+@@ -232,9 +204,8 @@ describe("from-parent — schema invariants", () => {
+ 		for (const message of [
+ 			mockRecordingRangeHlsMessage,
+ 			mockRecordingRangeNoPlaybackMessage,
+-			mockMediaMp4Message,
+-			mockMediaHlsMessage,
+ 			mockAudioRangeMessage,
++			mockAddMediaMessage,
+ 			mockClearProjectMessage,
+ 		]) {
+ 			assert.equal(
+@@ -245,3 +216,65 @@ describe("from-parent — schema invariants", () => {
+ 		}
+ 	});
+ });
++
++describe("from-parent — EDITOR_ADD_MEDIA", () => {
++	it("accepts message with non-empty mediaId", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_MEDIA",
++			mediaId: "img-001",
++		});
++		assert.equal(result.success, true);
++	});
++
++	it("rejects message without mediaId", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_MEDIA",
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("rejects message with empty mediaId", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_MEDIA",
++			mediaId: "   ",
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("rejects extra fields (strictObject)", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_MEDIA",
++			mediaId: "img-001",
++			requestId: "should-not-be-here",
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("rejects non-string mediaId", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_MEDIA",
++			mediaId: 42,
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("removes legacy image payload kind from union", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: { kind: "image", imageId: "img-001" },
++		});
++		assert.equal(result.success, false);
++	});
++
++	it("removes legacy media payload kind from union", () => {
++		const result = parentToEditorMessageSchema.safeParse({
++			type: "EDITOR_ADD_PREVIEW_ITEM",
++			payload: {
++				kind: "media",
++				mediaId: "media-1",
++				playback: { kind: "mp4", src: "https://example.com/v.mp4" },
++			},
++		});
++		assert.equal(result.success, false);
++	});
++});
+diff --git a/packages/contract/src/iframe/from-parent/index.ts b/packages/contract/src/iframe/from-parent/index.ts
+index ef0cc76..07c9564 100644
+--- a/packages/contract/src/iframe/from-parent/index.ts
++++ b/packages/contract/src/iframe/from-parent/index.ts
+@@ -2,11 +2,10 @@ export { isParentToEditorMessage, parseParentToEditorMessage } from "./helpers.j
+ export type {
+ 	AudioPlayback,
+ 	AudioRangePayload,
++	EditorAddMediaMessage,
+ 	EditorAddPreviewItemMessage,
+ 	EditorClearProjectMessage,
+ 	HlsPlayback,
+-	MediaPayload,
+-	MediaPlayback,
+ 	ParentToEditorMessage,
+ 	Playback,
+ 	PreviewItemPayload,
+@@ -15,12 +14,11 @@ export type {
+ export {
+ 	audioPlaybackSchema,
+ 	audioRangePayloadSchema,
++	editorAddMediaMessageSchema,
+ 	editorAddPreviewItemMessageSchema,
+ 	editorClearProjectMessageSchema,
+ 	hlsPlaybackSchema,
+ 	MAX_PREVIEW_DURATION_MS,
+-	mediaPayloadSchema,
+-	mediaPlaybackSchema,
+ 	parentToEditorMessageSchema,
+ 	playbackSchema,
+ 	previewItemPayloadSchema,
+diff --git a/packages/contract/src/iframe/from-parent/mocks.ts b/packages/contract/src/iframe/from-parent/mocks.ts
+index 98c1917..0c10ab5 100644
+--- a/packages/contract/src/iframe/from-parent/mocks.ts
++++ b/packages/contract/src/iframe/from-parent/mocks.ts
+@@ -22,36 +22,6 @@ export const mockRecordingRangeHlsMessage: ParentToEditorMessage = {
+ 	},
+ };
+ 
+-export const mockMediaMp4Message: ParentToEditorMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM",
+-	requestId: "mock-media-mp4",
+-	payload: {
+-		kind: "media",
+-		mediaId: "media-1001",
+-		durationMs: 120000,
+-		playback: {
+-			kind: "mp4",
+-			src: "https://example.com/media/mock-video.mp4",
+-		},
+-		posterSrc: "https://example.com/media/mock-video-poster.jpg",
+-	},
+-};
+-
+-export const mockMediaHlsMessage: ParentToEditorMessage = {
+-	type: "EDITOR_ADD_PREVIEW_ITEM",
+-	requestId: "mock-media-hls",
+-	payload: {
+-		kind: "media",
+-		mediaId: "media-1002",
+-		durationMs: 180000,
+-		playback: {
+-			kind: "hls",
+-			src: "https://example.com/media/mock-video/index.m3u8",
+-		},
+-		posterSrc: "https://example.com/media/mock-video-hls-poster.jpg",
+-	},
+-};
+-
+ export const mockAudioRangeMessage: ParentToEditorMessage = {
+ 	type: "EDITOR_ADD_PREVIEW_ITEM",
+ 	requestId: "mock-audio-range",
+@@ -82,6 +52,11 @@ export const mockRecordingRangeNoPlaybackMessage: ParentToEditorMessage = {
+ 	},
+ };
+ 
++export const mockAddMediaMessage: ParentToEditorMessage = {
++	type: "EDITOR_ADD_MEDIA",
++	mediaId: "img-001",
++};
++
+ export const mockClearProjectMessage: EditorClearProjectMessage = {
+ 	type: "EDITOR_CLEAR_PROJECT",
+ 	requestId: "mock-clear-project",
+diff --git a/packages/contract/src/iframe/from-parent/schemas.ts b/packages/contract/src/iframe/from-parent/schemas.ts
+index 2fb3d73..6496ea5 100644
+--- a/packages/contract/src/iframe/from-parent/schemas.ts
++++ b/packages/contract/src/iframe/from-parent/schemas.ts
+@@ -18,21 +18,12 @@ export const hlsPlaybackSchema = z.strictObject({
+ 	src: safeSrc,
+ });
+ 
+-export const mediaPlaybackSchema = z.strictObject({
+-	kind: z.union([z.literal("mp4"), z.literal("hls")]),
+-	src: safeSrc,
+-});
+-
+ export const audioPlaybackSchema = z.strictObject({
+ 	kind: z.union([z.literal("audio"), z.literal("hls")]),
+ 	src: safeSrc,
+ });
+ 
+-export const playbackSchema = z.union([
+-	hlsPlaybackSchema,
+-	mediaPlaybackSchema,
+-	audioPlaybackSchema,
+-]);
++export const playbackSchema = z.union([hlsPlaybackSchema, audioPlaybackSchema]);
+ 
+ export const recordingRangePayloadSchema = z
+ 	.strictObject({
+@@ -69,20 +60,6 @@ export const recordingRangePayloadSchema = z
+ 		path: ["durationMs"],
+ 	});
+ 
+-export const mediaPayloadSchema = z
+-	.strictObject({
+-		kind: z.literal("media"),
+-		mediaId: nonEmptyString,
+-		durationMs: positiveNumber.optional(),
+-		playback: mediaPlaybackSchema,
+-		posterSrc: nonEmptyString.optional(),
+-		name: z.string().optional(),
+-	})
+-	.refine((p) => (p.durationMs ?? 0) <= MAX_PREVIEW_DURATION_MS, {
+-		message: "durationMs exceeds the maximum supported preview duration",
+-		path: ["durationMs"],
+-	});
+-
+ export const audioRangePayloadSchema = z
+ 	.strictObject({
+ 		kind: z.literal("audio-range"),
+@@ -130,7 +107,6 @@ export const audioRangePayloadSchema = z
+ 
+ export const previewItemPayloadSchema = z.union([
+ 	recordingRangePayloadSchema,
+-	mediaPayloadSchema,
+ 	audioRangePayloadSchema,
+ ]);
+ 
+@@ -145,19 +121,24 @@ export const editorClearProjectMessageSchema = z.strictObject({
+ 	requestId: requestIdSchema,
+ });
+ 
++export const editorAddMediaMessageSchema = z.strictObject({
++	type: z.literal("EDITOR_ADD_MEDIA"),
++	mediaId: nonEmptyString,
++});
++
+ export const parentToEditorMessageSchema = z.union([
+ 	editorAddPreviewItemMessageSchema,
+ 	editorClearProjectMessageSchema,
++	editorAddMediaMessageSchema,
+ ]);
+ 
+ export type HlsPlayback = z.infer<typeof hlsPlaybackSchema>;
+-export type MediaPlayback = z.infer<typeof mediaPlaybackSchema>;
+ export type AudioPlayback = z.infer<typeof audioPlaybackSchema>;
+ export type Playback = z.infer<typeof playbackSchema>;
+ export type RecordingRangePayload = z.infer<typeof recordingRangePayloadSchema>;
+-export type MediaPayload = z.infer<typeof mediaPayloadSchema>;
+ export type AudioRangePayload = z.infer<typeof audioRangePayloadSchema>;
+ export type PreviewItemPayload = z.infer<typeof previewItemPayloadSchema>;
+ export type EditorAddPreviewItemMessage = z.infer<typeof editorAddPreviewItemMessageSchema>;
+ export type EditorClearProjectMessage = z.infer<typeof editorClearProjectMessageSchema>;
++export type EditorAddMediaMessage = z.infer<typeof editorAddMediaMessageSchema>;
+ export type ParentToEditorMessage = z.infer<typeof parentToEditorMessageSchema>;
+diff --git a/packages/contract/src/iframe/to-parent/__tests__/helpers.test.ts b/packages/contract/src/iframe/to-parent/__tests__/helpers.test.ts
+index e9a0c62..ab39491 100644
+--- a/packages/contract/src/iframe/to-parent/__tests__/helpers.test.ts
++++ b/packages/contract/src/iframe/to-parent/__tests__/helpers.test.ts
+@@ -10,33 +10,55 @@ import {
+ 
+ describe("createPreviewItemAddedMessage", () => {
+ 	it("builds message with itemId and requestId", () => {
+-		assert.deepEqual(createPreviewItemAddedMessage("id", "req"), {
++		assert.deepEqual(createPreviewItemAddedMessage("id", { requestId: "req" }), {
+ 			type: "EDITOR_PREVIEW_ITEM_ADDED",
+ 			itemId: "id",
+ 			requestId: "req",
++			mediaId: undefined,
+ 		});
+ 	});
+ 
+-	it("requestId is undefined when omitted", () => {
++	it("builds message with itemId and mediaId echo", () => {
++		assert.deepEqual(createPreviewItemAddedMessage("id", { mediaId: "media-1" }), {
++			type: "EDITOR_PREVIEW_ITEM_ADDED",
++			itemId: "id",
++			requestId: undefined,
++			mediaId: "media-1",
++		});
++	});
++
++	it("correlation fields undefined when omitted", () => {
+ 		const msg = createPreviewItemAddedMessage("id");
+ 		assert.equal(msg.requestId, undefined);
++		assert.equal(msg.mediaId, undefined);
+ 	});
+ });
+ 
+ describe("createPreviewItemRejectedMessage", () => {
+ 	it("builds message with reason and requestId", () => {
+-		assert.deepEqual(createPreviewItemRejectedMessage("nope", "req"), {
++		assert.deepEqual(createPreviewItemRejectedMessage("nope", { requestId: "req" }), {
+ 			type: "EDITOR_PREVIEW_ITEM_REJECTED",
+ 			reason: "nope",
+ 			requestId: "req",
++			mediaId: undefined,
++		});
++	});
++
++	it("builds message with reason and mediaId echo", () => {
++		assert.deepEqual(createPreviewItemRejectedMessage("nope", { mediaId: "bogus" }), {
++			type: "EDITOR_PREVIEW_ITEM_REJECTED",
++			reason: "nope",
++			requestId: undefined,
++			mediaId: "bogus",
+ 		});
+ 	});
+ 
+-	it("requestId is undefined when omitted", () => {
++	it("correlation fields undefined when omitted", () => {
+ 		assert.deepEqual(createPreviewItemRejectedMessage("reason"), {
+ 			type: "EDITOR_PREVIEW_ITEM_REJECTED",
+ 			reason: "reason",
+ 			requestId: undefined,
++			mediaId: undefined,
+ 		});
+ 	});
+ });
+diff --git a/packages/contract/src/iframe/to-parent/__tests__/schemas.test.ts b/packages/contract/src/iframe/to-parent/__tests__/schemas.test.ts
+index efc1103..ad44cc9 100644
+--- a/packages/contract/src/iframe/to-parent/__tests__/schemas.test.ts
++++ b/packages/contract/src/iframe/to-parent/__tests__/schemas.test.ts
+@@ -1,5 +1,6 @@
+ import assert from "node:assert/strict";
+ import { describe, it } from "node:test";
++import { createPreviewItemAddedMessage, createPreviewItemRejectedMessage } from "../helpers.js";
+ import { mockMediaSavedMessage } from "../mocks.js";
+ import { editorToParentMessageSchema } from "../schemas.js";
+ 
+@@ -96,3 +97,46 @@ describe("to-parent — editorMediaSavedMessageSchema", () => {
+ 		assert.equal(editorToParentMessageSchema.safeParse(mockMediaSavedMessage).success, true);
+ 	});
+ });
++
++describe("to-parent — preview-item correlation (mediaId echo)", () => {
++	it("accepts EDITOR_PREVIEW_ITEM_ADDED with mediaId echo and no requestId", () => {
++		const msg = createPreviewItemAddedMessage("item-xyz", { mediaId: "img-001" });
++		const result = editorToParentMessageSchema.safeParse(msg);
++		assert.equal(result.success, true);
++		if (result.success && result.data.type === "EDITOR_PREVIEW_ITEM_ADDED") {
++			assert.equal(result.data.mediaId, "img-001");
++			assert.equal(result.data.requestId, undefined);
++		}
++	});
++
++	it("accepts EDITOR_PREVIEW_ITEM_ADDED with requestId and no mediaId", () => {
++		const msg = createPreviewItemAddedMessage("item-xyz", { requestId: "req-1" });
++		const result = editorToParentMessageSchema.safeParse(msg);
++		assert.equal(result.success, true);
++	});
++
++	it("accepts EDITOR_PREVIEW_ITEM_ADDED with neither correlation field", () => {
++		const msg = createPreviewItemAddedMessage("item-xyz");
++		const result = editorToParentMessageSchema.safeParse(msg);
++		assert.equal(result.success, true);
++	});
++
++	it("accepts EDITOR_PREVIEW_ITEM_REJECTED with mediaId echo", () => {
++		const msg = createPreviewItemRejectedMessage("media not found", { mediaId: "bogus" });
++		const result = editorToParentMessageSchema.safeParse(msg);
++		assert.equal(result.success, true);
++		if (result.success && result.data.type === "EDITOR_PREVIEW_ITEM_REJECTED") {
++			assert.equal(result.data.mediaId, "bogus");
++			assert.equal(result.data.reason, "media not found");
++		}
++	});
++
++	it("rejects EDITOR_PREVIEW_ITEM_ADDED with empty mediaId", () => {
++		const result = editorToParentMessageSchema.safeParse({
++			type: "EDITOR_PREVIEW_ITEM_ADDED",
++			itemId: "item-xyz",
++			mediaId: "  ",
++		});
++		assert.equal(result.success, false);
++	});
++});
+diff --git a/packages/contract/src/iframe/to-parent/helpers.ts b/packages/contract/src/iframe/to-parent/helpers.ts
+index 3e19a88..bdf4c61 100644
+--- a/packages/contract/src/iframe/to-parent/helpers.ts
++++ b/packages/contract/src/iframe/to-parent/helpers.ts
+@@ -6,21 +6,25 @@ import type {
+ 	EditorProjectClearedMessage,
+ } from "./schemas.js";
+ 
++export type PreviewItemCorrelation = { requestId?: string; mediaId?: string };
++
+ export const createPreviewItemAddedMessage = (
+ 	itemId: string,
+-	requestId?: string,
++	correlation: PreviewItemCorrelation = {},
+ ): EditorPreviewItemAddedMessage => ({
+ 	type: "EDITOR_PREVIEW_ITEM_ADDED",
+-	requestId,
++	requestId: correlation.requestId,
++	mediaId: correlation.mediaId,
+ 	itemId,
+ });
+ 
+ export const createPreviewItemRejectedMessage = (
+ 	reason: string,
+-	requestId?: string,
++	correlation: PreviewItemCorrelation = {},
+ ): EditorPreviewItemRejectedMessage => ({
+ 	type: "EDITOR_PREVIEW_ITEM_REJECTED",
+-	requestId,
++	requestId: correlation.requestId,
++	mediaId: correlation.mediaId,
+ 	reason,
+ });
+ 
+diff --git a/packages/contract/src/iframe/to-parent/index.ts b/packages/contract/src/iframe/to-parent/index.ts
+index 60e6be6..56bfa08 100644
+--- a/packages/contract/src/iframe/to-parent/index.ts
++++ b/packages/contract/src/iframe/to-parent/index.ts
+@@ -8,6 +8,7 @@ export {
+ 	createPreviewItemAddedMessage,
+ 	createPreviewItemRejectedMessage,
+ 	createProjectClearedMessage,
++	type PreviewItemCorrelation,
+ } from "./helpers.js";
+ export type {
+ 	EditorMediaSavedMessage,
+diff --git a/packages/contract/src/iframe/to-parent/schemas.ts b/packages/contract/src/iframe/to-parent/schemas.ts
+index 0e14c1e..23b342d 100644
+--- a/packages/contract/src/iframe/to-parent/schemas.ts
++++ b/packages/contract/src/iframe/to-parent/schemas.ts
+@@ -11,12 +11,14 @@ const safeSrc = nonEmptyString.refine(safeMediaUrl, {
+ export const editorPreviewItemAddedMessageSchema = z.strictObject({
+ 	type: z.literal("EDITOR_PREVIEW_ITEM_ADDED"),
+ 	requestId: requestIdSchema,
++	mediaId: nonEmptyString.optional(),
+ 	itemId: nonEmptyString,
+ });
+ 
+ export const editorPreviewItemRejectedMessageSchema = z.strictObject({
+ 	type: z.literal("EDITOR_PREVIEW_ITEM_REJECTED"),
+ 	requestId: requestIdSchema,
++	mediaId: nonEmptyString.optional(),
+ 	reason: nonEmptyString,
+ });
+ 
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 67dfb53..4376c7a 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -536,6 +536,7 @@ packages:
+   '@angular/animations@21.2.14':
+     resolution: {integrity: sha512-9WLnsJE0xqtd1rVtHMvsAUxFy3OdPks4bdmUIqyw23X/je7ytUALAGWNadffcZBwRpa1A6TUnLr9X4+Draz3kw==}
+     engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
++    deprecated: '@angular/animations is deprecated. Use `animate.enter` and `animate.leave` instead. For more information see: https://v22.angular.dev/guide/animations.'
+     peerDependencies:
+       '@angular/core': 21.2.14
+ 

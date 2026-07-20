@@ -1,0 +1,17 @@
+{
+  "name": "@danielrispler/skills",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "grab-skills": "cli.js"
+  },
+  "files": [
+    "cli.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.7.0"
+  }
+}

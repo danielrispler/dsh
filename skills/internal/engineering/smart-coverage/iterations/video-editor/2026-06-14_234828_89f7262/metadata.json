@@ -1,0 +1,19 @@
+{
+  "iteration_id": "2026-06-14_234828_89f7262",
+  "repo": "video-editor",
+  "repo_root": "/Users/danielrispler/work/video-editor",
+  "branch": "main",
+  "sha": "89f7262e7fae5c59b3a2edbc79d2c6e8c9671e2f",
+  "target": "main",
+  "diff_files": 92,
+  "diff_lines": 4950,
+  "untracked_files_included": 0,
+  "timestamps": {
+    "started": "2026-06-14T20:49:02Z",
+    "baseline_duration_s": 174,
+    "treatment_duration_s": 231,
+    "finished": "2026-06-14T20:57:05Z"
+  },
+  "rating": "baseline",
+  "rating_note": null
+}

@@ -1,4 +1,8 @@
 {
   "name": "danielrispler-skills",
-  "skills": []
+  "skills": [
+    "skills/internal/engineering/deep-session",
+    "skills/internal/engineering/pr-audit",
+    "skills/internal/engineering/smart-coverage"
+  ]
 }

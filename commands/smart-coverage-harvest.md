@@ -25,7 +25,7 @@ Default mode is **token-safe**: only `metadata.json` + `summary.md` + `review.md
 ## Step 1 — Collect iterations
 
 ```bash
-ROOT=/Users/danielrispler/work/skills/skills/engineering/smart-coverage/iterations
+ROOT=/Users/danielrispler/work/skills/skills/internal/engineering/smart-coverage/iterations
 find "$ROOT" -mindepth 2 -maxdepth 2 -type d | sort > /tmp/iter-list
 ```
 
@@ -145,13 +145,13 @@ If `--full` was passed at invocation, skip Step 3 batching and load every iterat
 ## Step 6 — Write digest
 
 ```bash
-HARVEST_PATH=/Users/danielrispler/work/skills/skills/engineering/smart-coverage/iterations/HARVEST_$(date +%Y-%m-%d_%H%M%S).md
+HARVEST_PATH=/Users/danielrispler/work/skills/skills/internal/engineering/smart-coverage/iterations/HARVEST_$(date +%Y-%m-%d_%H%M%S).md
 ```
 
 Write the digest to `$HARVEST_PATH`. Print:
 
 ```
-Harvest digest → skills/engineering/smart-coverage/iterations/HARVEST_<ts>.md
+Harvest digest → skills/internal/engineering/smart-coverage/iterations/HARVEST_<ts>.md
 ```
 
 Do not auto-apply proposals to `SKILL.md`. User reviews and hand-applies. Do not auto-commit.

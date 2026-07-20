@@ -44,7 +44,7 @@ SHA7=${SHA:0:7}
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 TS=$(date +%Y-%m-%d_%H%M%S)
 ITER_ID="${TS}_${SHA7}"
-ITER_DIR="/Users/danielrispler/work/skills/skills/engineering/smart-coverage/iterations/${REPO_NAME}/${ITER_ID}"
+ITER_DIR="/Users/danielrispler/work/skills/skills/internal/engineering/smart-coverage/iterations/${REPO_NAME}/${ITER_ID}"
 mkdir -p "$ITER_DIR"
 
 # Tracked diff
@@ -73,7 +73,7 @@ Spawn an `Agent` with `subagent_type: general-purpose`. Pass the diff contents i
 > You are a senior engineer doing a code review. Below is a git diff. Tell me what tests are missing for the changed code. Use whatever output format you think is best — your honest professional take.
 >
 > Hard constraints:
-> - Do NOT read or load any file under `/Users/danielrispler/work/skills/skills/engineering/smart-coverage/`. That directory is off-limits for this task.
+> - Do NOT read or load any file under `/Users/danielrispler/work/skills/skills/internal/engineering/smart-coverage/`. That directory is off-limits for this task.
 > - Do NOT use any tool whose name contains "smart-coverage".
 > - Black-box reasoning is preferred but not required — write what you'd actually say in a review.
 >
@@ -202,7 +202,7 @@ If the user dismisses or does not answer, leave `rating: null` and proceed.
 
 ## Step 8 — Append to INDEX.md
 
-Append one line to `/Users/danielrispler/work/skills/skills/engineering/smart-coverage/iterations/INDEX.md`:
+Append one line to `/Users/danielrispler/work/skills/skills/internal/engineering/smart-coverage/iterations/INDEX.md`:
 
 ```
 | <iter-id> | <repo> | <sha7> | <branch> | <target> | <files>f/<lines>l | <rating-or-?> | <one-line summary> |
@@ -215,7 +215,7 @@ The one-line summary is the strongest single observation from `summary.md` (typi
 Print one line:
 
 ```
-Iteration saved → skills/engineering/smart-coverage/iterations/<repo>/<iter-id>/
+Iteration saved → skills/internal/engineering/smart-coverage/iterations/<repo>/<iter-id>/
 ```
 
 Done. Do not narrate further. Do not auto-commit.

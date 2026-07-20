@@ -9,8 +9,12 @@ A folder containing a `SKILL.md` file (and optional supporting files) that teach
 _Avoid_: command, plugin, prompt
 
 **Bucket**:
-A top-level category folder under `skills/` that groups related skills (e.g. `engineering/`, `productivity/`).
+A category folder under `skills/internal/` that groups related skills (e.g. `engineering/`, `productivity/`).
 _Avoid_: category folder, group
+
+**Internal / External**:
+`skills/internal/` holds skills that live in this repo (grouped into buckets). `skills/external/` holds **reference stubs** (a `REFERENCE.md` each) for skills that live in the closed network — referenced, never vendored. No `SKILL.md` under `external/`.
+_Avoid_: local/remote, vendored
 
 **Trigger**:
 A phrase, keyword, or context pattern described in a skill's `description` frontmatter field that causes an agent to load and apply that skill.
@@ -30,6 +34,7 @@ _Avoid_: install script, setup script
 
 ## Relationships
 
-- A **bucket** holds many **skills**
+- A **bucket** (under `skills/internal/`) holds many **skills**
 - A **skill** always has exactly one **SKILL.md**
-- **plugin.json** references only public skills (engineering, productivity, misc buckets)
+- **plugin.json** references only public internal skills (engineering, productivity, misc buckets); never `external/`
+- **link-skills** / **list-skills** scan `skills/internal/` only, so `external/` stubs are excluded automatically

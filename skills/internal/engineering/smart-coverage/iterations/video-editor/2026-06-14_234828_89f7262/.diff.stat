@@ -1,0 +1,93 @@
+ CLAUDE.md                                          |  16 +-
+ CONTEXT.md                                         |  13 +
+ apps/core-mock/CLAUDE.md                           |   3 +
+ apps/core-mock/README.md                           |   7 +-
+ apps/core-mock/fixtures/clip/demo-clip-001.mp4     | Bin 0 -> 1989420 bytes
+ .../fixtures/dash/demo-clip-001/init_v0.mp4        | Bin 0 -> 816 bytes
+ .../fixtures/dash/demo-clip-001/init_v1.mp4        | Bin 0 -> 765 bytes
+ .../fixtures/dash/demo-clip-001/manifest.mpd       |  39 +++
+ .../fixtures/dash/demo-clip-001/segment_v0_1.m4s   | Bin 0 -> 608993 bytes
+ .../fixtures/dash/demo-clip-001/segment_v0_2.m4s   | Bin 0 -> 637011 bytes
+ .../fixtures/dash/demo-clip-001/segment_v0_3.m4s   | Bin 0 -> 615378 bytes
+ .../fixtures/dash/demo-clip-001/segment_v1_1.m4s   | Bin 0 -> 42208 bytes
+ .../fixtures/dash/demo-clip-001/segment_v1_2.m4s   | Bin 0 -> 41264 bytes
+ .../fixtures/dash/demo-clip-001/segment_v1_3.m4s   | Bin 0 -> 41527 bytes
+ .../fixtures/dash/demo-clip-001/segment_v1_4.m4s   | Bin 0 -> 739 bytes
+ .../fixtures/dash/uploaded-001/init_v0.mp4         | Bin 0 -> 816 bytes
+ .../fixtures/dash/uploaded-001/init_v1.mp4         | Bin 0 -> 765 bytes
+ .../fixtures/dash/uploaded-001/manifest.mpd        |  39 +++
+ .../fixtures/dash/uploaded-001/segment_v0_1.m4s    | Bin 0 -> 54416 bytes
+ .../fixtures/dash/uploaded-001/segment_v0_2.m4s    | Bin 0 -> 54667 bytes
+ .../fixtures/dash/uploaded-001/segment_v0_3.m4s    | Bin 0 -> 54566 bytes
+ .../fixtures/dash/uploaded-001/segment_v1_1.m4s    | Bin 0 -> 60571 bytes
+ .../fixtures/dash/uploaded-001/segment_v1_2.m4s    | Bin 0 -> 61033 bytes
+ .../fixtures/dash/uploaded-001/segment_v1_3.m4s    | Bin 0 -> 61286 bytes
+ .../fixtures/dash/uploaded-001/segment_v1_4.m4s    | Bin 0 -> 1203 bytes
+ apps/core-mock/fixtures/images/img-001.jpg         | Bin 0 -> 62949 bytes
+ apps/core-mock/fixtures/images/img-002.jpg         | Bin 0 -> 67519 bytes
+ apps/core-mock/fixtures/images/img-003.jpg         | Bin 0 -> 62651 bytes
+ apps/core-mock/fixtures/images/screenshot-001.jpg  | Bin 0 -> 30339 bytes
+ apps/core-mock/src/__tests__/storage-clip.test.ts  |  33 ++
+ apps/core-mock/src/__tests__/storage-image.test.ts |  45 +++
+ apps/core-mock/src/__tests__/storage-mpd.test.ts   | 109 +++++++
+ apps/core-mock/src/__tests__/videos-play.test.ts   |  64 ++++
+ apps/core-mock/src/__tests__/watch.test.ts         |  45 +++
+ apps/core-mock/src/fixtures/clip.ts                |  16 +
+ apps/core-mock/src/fixtures/dash.ts                |  43 +++
+ apps/core-mock/src/fixtures/images.ts              |  18 ++
+ apps/core-mock/src/fixtures/media-registry.ts      |  31 ++
+ apps/core-mock/src/index.ts                        |  97 ++++++
+ apps/frontend/.env                                 |   2 +-
+ apps/frontend/.env.preprod                         |   2 +-
+ apps/frontend/.env.production                      |   2 +-
+ apps/frontend/CLAUDE.md                            |  16 +-
+ apps/frontend/src/features/editor/editor.tsx       |   6 +-
+ .../__tests__/handle-parent-message.test.ts        | 115 +++++--
+ .../__tests__/payload-intake.test.ts               | 158 ++++++++--
+ .../__tests__/preview-source-api.test.ts           |  46 ++-
+ .../external-preview/handle-parent-message.ts      |  47 ++-
+ .../editor/external-preview/payload-intake.ts      | 339 +++++++++++++++------
+ .../editor/external-preview/preview-source-api.ts  |  33 +-
+ .../external-preview/use-editor-post-message.ts    |   3 +-
+ .../src/features/editor/hooks/use-easter-eggs.ts   |  43 ++-
+ .../editor/hooks/use-timeline-edge-scroll.ts       |   4 +-
+ apps/frontend/src/features/editor/navbar.tsx       |   9 +
+ .../utils/__tests__/extract-saved-items.test.ts    |  23 +-
+ .../features/editor/utils/extract-saved-items.ts   |   3 +-
+ apps/frontend/vite.config.ts                       |   2 +-
+ apps/iframe-demo/CLAUDE.md                         |   6 +-
+ apps/iframe-demo/README.md                         |   5 +-
+ apps/iframe-demo/angular.json                      |   4 +-
+ apps/iframe-demo/biome.jsonc                       |   5 +
+ apps/iframe-demo/src/app/message-types.ts          |  13 +-
+ .../pages/editor-page/editor-page.component.html   | 261 ++++++++++------
+ .../pages/editor-page/editor-page.component.scss   | 316 +++++++++++++------
+ .../app/pages/editor-page/editor-page.component.ts |  54 +++-
+ .../src/app/services/editor-bridge.service.ts      |  12 +-
+ apps/server/CLAUDE.md                              |   6 +-
+ .../http/__tests__/preview.controller.e2e.test.ts  |  74 +++++
+ .../adapters/inbound/http/preview.controller.ts    | 161 ++++++----
+ .../outbound/http/HttpPreviewSourceAdapter.ts      |  58 +++-
+ .../__tests__/HttpPreviewSourceAdapter.test.ts     | 110 +++++++
+ .../ports/outbound/PreviewSourcePort.ts            |   9 +-
+ .../services/__tests__/url-signing.test.ts         |  36 ++-
+ .../preview/application/services/url-signing.ts    |   9 +-
+ .../use-cases/GeneratePreviewUseCase.ts            | 121 ++++++--
+ .../__tests__/GeneratePreviewUseCase.test.ts       |  66 +++-
+ docs/adr/0007-stored-media-id-only-intake.md       |  49 +++
+ knip.json                                          |   1 -
+ packages/contract/CLAUDE.md                        |   2 +
+ packages/contract/README.md                        |  12 +-
+ packages/contract/package.json                     |   2 +-
+ .../iframe/from-parent/__tests__/helpers.test.ts   |   6 +-
+ .../iframe/from-parent/__tests__/schemas.test.ts   |  95 ++++--
+ packages/contract/src/iframe/from-parent/index.ts  |   6 +-
+ packages/contract/src/iframe/from-parent/mocks.ts  |  35 +--
+ .../contract/src/iframe/from-parent/schemas.ts     |  35 +--
+ .../src/iframe/to-parent/__tests__/helpers.test.ts |  30 +-
+ .../src/iframe/to-parent/__tests__/schemas.test.ts |  44 +++
+ packages/contract/src/iframe/to-parent/helpers.ts  |  12 +-
+ packages/contract/src/iframe/to-parent/index.ts    |   1 +
+ packages/contract/src/iframe/to-parent/schemas.ts  |   2 +
+ pnpm-lock.yaml                                     |   1 +
+ 92 files changed, 2500 insertions(+), 630 deletions(-)

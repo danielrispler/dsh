@@ -8,7 +8,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 echo "Public skills:"
 echo ""
 
-find "$REPO/skills" -name SKILL.md \
+find "$REPO/skills/internal" -name SKILL.md \
   -not -path '*/node_modules/*' \
   -not -path '*/deprecated/*' \
   -not -path '*/in-progress/*' \
