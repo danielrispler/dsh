@@ -1,6 +1,7 @@
 {
-  "name": "@danielrispler/skills",
+  "name": "daniel-skill-hub",
   "version": "0.1.0",
+  "description": "Interactive picker to grab skills from the internal GitLab skills repo.",
   "type": "module",
   "bin": {
     "grab-skills": "cli.js"
@@ -13,5 +14,8 @@
   },
   "dependencies": {
     "@clack/prompts": "^0.7.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npm.internal"
   }
 }
