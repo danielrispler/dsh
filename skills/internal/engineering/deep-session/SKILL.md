@@ -1,6 +1,6 @@
 ---
 name: deep-session
-description: Full TDD development session: grills the user to understand the task and produce a plan (grill-with-docs), implements it test-first (tdd), then iterates with smart-coverage sub-agent until all Critical and High coverage gaps are closed. Use whenever the user wants to build a feature or fix a bug end-to-end, especially when they say "let's do a deep session", "full session", "build X from scratch with tests", "implement X properly", or "I want to do this right". Auto-trigger even when the user doesn't say "deep session" — if the task is non-trivial and they haven't asked for a quick fix, this is almost certainly what they want.
+description: Full TDD development session — grills the user to understand the task and produce a plan (grill-with-docs), implements it test-first (tdd), then iterates with smart-coverage sub-agent until all Critical and High coverage gaps are closed. Use whenever the user wants to build a feature or fix a bug end-to-end, especially when they say "let's do a deep session", "full session", "build X from scratch with tests", "implement X properly", or "I want to do this right". Auto-trigger even when the user doesn't say "deep session" — if the task is non-trivial and they haven't asked for a quick fix, this is almost certainly what they want.
 ---
 
 # Deep Session

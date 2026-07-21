@@ -25,6 +25,19 @@
     "./skills/external/mattpocock-skills/skills/productivity/grilling",
     "./skills/external/mattpocock-skills/skills/productivity/handoff",
     "./skills/external/mattpocock-skills/skills/productivity/teach",
-    "./skills/external/mattpocock-skills/skills/productivity/writing-great-skills"
+    "./skills/external/mattpocock-skills/skills/productivity/writing-great-skills",
+    "./skills/external/caveman/skills/caveman",
+    "./skills/external/caveman/skills/caveman-commit",
+    "./skills/external/caveman/skills/caveman-compress",
+    "./skills/external/caveman/skills/caveman-help",
+    "./skills/external/caveman/skills/caveman-review",
+    "./skills/external/caveman/skills/caveman-stats",
+    "./skills/external/caveman/skills/cavecrew",
+    "./skills/external/ponytail/skills/ponytail",
+    "./skills/external/ponytail/skills/ponytail-audit",
+    "./skills/external/ponytail/skills/ponytail-debt",
+    "./skills/external/ponytail/skills/ponytail-gain",
+    "./skills/external/ponytail/skills/ponytail-help",
+    "./skills/external/ponytail/skills/ponytail-review"
   ]
 }
