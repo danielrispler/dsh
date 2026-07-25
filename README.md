@@ -27,8 +27,7 @@ _Skills for daily non-code workflow tools._
 
 | Skill | Description |
 |-------|-------------|
-
-_No skills yet._
+| [hebrew-pr](skills/internal/productivity/hebrew-pr/SKILL.md) | Open a GitHub PR from the current branch with a Hebrew-language description (English conventional-commit title, Hebrew body). |
 
 ### External Skills
 
