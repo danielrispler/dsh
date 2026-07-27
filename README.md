@@ -31,8 +31,66 @@ _Skills for daily non-code workflow tools._
 
 ### External Skills
 
-Some skills live in the closed network and are referenced, not vendored here. See
+Third-party skill repos vendored in (`.git` stripped, `REFERENCE.md` each). See
 [`skills/external/`](skills/external/README.md).
+
+## Full plugins (marketplace)
+
+Beyond skills, `dsh` is also a Claude Code **plugin marketplace**. `plugins/` holds full
+plugins (commands + agents + hooks + skills) vendored from
+[`anthropics/claude-plugins-official`](https://github.com/anthropics/claude-plugins-official),
+and the repo's [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json) is the
+authoritative catalog (23 plugins). Skills and plugins are **separate lanes** — `grab-skills`
+installs skills, the marketplace installs plugins.
+
+Only **offline-friendly** plugins are served — nothing that needs runtime network, SaaS MCP,
+or a downloaded LSP binary. Vendored set: `code-review`, `pr-review-toolkit`, `feature-dev`,
+`commit-commands`, `code-modernization`, `code-simplifier`, `claude-md-management`, `hookify`,
+`skill-creator`, `plugin-dev`, `mcp-server-dev`, `agent-sdk-dev`, `security-guidance`,
+`claude-security`, `session-report`, `receipts`, `project-artifact`, `math-olympiad`,
+`explanatory-output-style`, `learning-output-style`, `frontend-design`, `claude-code-setup`,
+`ralph-loop`. **Excluded** (won't run offline): every `*-lsp`, `mcp-tunnels`, and all
+`external_plugins/*` (SaaS MCP). _Caveat: a few plugins ship hooks as shell scripts — verify
+those on the closed net's Windows shell before relying on them._
+
+### Auto mode (recommended, zero manual install)
+
+The checked-in [`.claude/settings.json`](.claude/settings.json) declares the marketplace
+(`extraKnownMarketplaces`) and enables every plugin (`enabledPlugins`). Opening `dsh` — or any
+repo carrying the same two keys — auto-installs the whole set, no per-plugin command. To wire
+another repo, copy those two keys from `dsh`'s `.claude/settings.json` into its
+`.claude/settings.json`. The marketplace `url` there must point at the internal GitLab mirror
+(currently the `// FILL ME` placeholder `https://gitlab.internal/platform/dsh.git`); set
+`DSH_GIT_URL` and re-run `scripts/gen-marketplace.sh` to bake in the real one.
+
+### Manual install (fallback)
+
+Closed net is Windows-only; add the marketplace once, then install any plugin:
+
+```cmd
+/plugin marketplace add https://<host>/<namespace>/dsh.git
+/plugin install code-review@dsh
+```
+
+`/plugin marketplace add` also accepts a **local clone path** instead of a URL (fully
+air-gapped machine). Both make zero Anthropic calls. For offline resilience, set
+`CLAUDE_CODE_PLUGIN_KEEP_MARKETPLACE_ON_FAILURE=1` (keep the last-good clone if a mirror
+`git pull` fails).
+
+### For developers (open net only)
+
+Re-vendor from upstream and regenerate the catalog + auto-install config:
+
+```bash
+bash scripts/vendor-plugins.sh          # clone upstream, copy the offline-friendly set, strip .git
+bash scripts/gen-marketplace.sh         # regenerate marketplace.json + .claude/settings.json
+DSH_GIT_URL=https://<host>/<ns>/dsh.git bash scripts/gen-marketplace.sh   # bake real mirror URL
+node test.js                            # verify plugins/ ↔ marketplace.json ↔ enabledPlugins sync
+```
+
+To add one plugin by hand: drop it under `plugins/<name>/` (must contain
+`.claude-plugin/plugin.json` with matching `name`), then run `gen-marketplace.sh`. See
+[CLAUDE.md](CLAUDE.md) for the registration rules.
 
 ## Open network
 
