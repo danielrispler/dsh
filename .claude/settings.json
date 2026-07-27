@@ -1,0 +1,35 @@
+{
+  "extraKnownMarketplaces": {
+    "dsh": {
+      "source": {
+        "source": "url",
+        "url": "https://gitlab.internal/platform/dsh.git"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "agent-sdk-dev@dsh": true,
+    "claude-code-setup@dsh": true,
+    "claude-md-management@dsh": true,
+    "claude-security@dsh": true,
+    "code-modernization@dsh": true,
+    "code-review@dsh": true,
+    "code-simplifier@dsh": true,
+    "commit-commands@dsh": true,
+    "explanatory-output-style@dsh": true,
+    "feature-dev@dsh": true,
+    "frontend-design@dsh": true,
+    "hookify@dsh": true,
+    "learning-output-style@dsh": true,
+    "math-olympiad@dsh": true,
+    "mcp-server-dev@dsh": true,
+    "plugin-dev@dsh": true,
+    "pr-review-toolkit@dsh": true,
+    "project-artifact@dsh": true,
+    "ralph-loop@dsh": true,
+    "receipts@dsh": true,
+    "security-guidance@dsh": true,
+    "session-report@dsh": true,
+    "skill-creator@dsh": true
+  }
+}
