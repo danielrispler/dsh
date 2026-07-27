@@ -5,7 +5,7 @@
 This repo ships to two audiences:
 
 - **Open network** — mirrored to public GitHub. Install with the public `skills` CLI.
-- **Closed network** — mirrored to internal GitLab. Install with `grab-skills` from the internal npm mirror.
+- **Closed network** — mirrored to internal GitLab. Install with the same public `skills` CLI pointed at the mirror via `GH_HOST` (or `grab-skills` for anon-archive installs).
 
 Jump to [Open network](#open-network) or [Closed network](#closed-network).
 
@@ -44,6 +44,8 @@ Install skills with the public `skills` CLI — pick which skills and which agen
 npx skills@latest add danielrispler/dsh
 ```
 
+Closed network? See [Closed network](#closed-network) — same command, redirected via `GH_HOST`.
+
 ### For developers
 
 Work against the repo directly. Link skills into `~/.claude/skills`:
@@ -68,14 +70,40 @@ registration rules (`README.md` + `plugin.json` + bucket `README.md`).
 ## Closed network
 
 Inside a closed network there is no public GitHub or npm — the repo is mirrored to an
-internal GitLab and skills are pulled with `grab-skills` (in this repo: `cli.js`).
-`grab-skills` downloads the repo archive over public-read HTTP (no auth token), shows a
-grouped picker of internal **and** vendored external skills, and copies the chosen dirs
-into `~/.claude/skills`.
+internal GitLab. Use the **same public `skills` CLI** as the open network, redirected to
+the mirror with the `GH_HOST` env var (the CLI clones `https://%GH_HOST%/<owner>/<repo>.git`).
+The closed network is **Windows-only**, so commands below use Windows syntax.
 
 ### For users
 
-Run it straight from the internal npm mirror:
+Closed-net twin of the [open-network](#open-network) command — same CLI, host swapped.
+Replace `<host>` with the internal GitLab host and `<namespace>` with the project namespace.
+
+**Set once per machine** (persists to new terminals — reopen after running):
+
+```cmd
+setx GH_HOST <host>
+```
+
+Then reopen the terminal and install:
+
+```cmd
+npx skills@latest add <namespace>/dsh
+```
+
+Or, without persisting, set it for the current PowerShell session only:
+
+```powershell
+$env:GH_HOST="<host>"; npx skills@latest add <namespace>/dsh
+```
+
+The mirror project must be anonymously HTTPS-clonable; otherwise the CLI falls back to
+`gh`/SSH (set `GIT_SSH_COMMAND`/creds).
+
+**Alternative — `grab-skills`** (anon-archive install, no git needed): downloads the repo
+archive over public-read HTTP and shows a grouped picker of internal **and** vendored
+external skills, copying chosen dirs into `~/.claude/skills`. Run from the internal npm
+mirror:
 
 ```bash
 npx @internal/grab-skills                 # picker → ~/.claude/skills

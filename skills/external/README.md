@@ -11,3 +11,9 @@ scan `skills/internal/` only, so externals are excluded from local install and f
 | caveman | https://github.com/juliusbrussee/caveman |
 | mattpocock-skills | https://github.com/mattpocock/skills |
 | ponytail | https://github.com/DietrichGebert/ponytail |
+| agent-skills | https://github.com/vercel-labs/agent-skills |
+| vercel-ai | https://github.com/vercel/ai |
+| vercel-workflow | https://github.com/vercel/workflow |
+| agent-browser | https://github.com/vercel-labs/agent-browser |
+| json-render | https://github.com/vercel-labs/json-render |
+| agentic-commerce-skills | https://github.com/vercel-labs/agentic-commerce-skills |
